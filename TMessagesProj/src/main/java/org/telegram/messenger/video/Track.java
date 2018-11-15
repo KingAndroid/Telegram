@@ -8,7 +8,6 @@
 
 package org.telegram.messenger.video;
 
-import android.annotation.TargetApi;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -29,13 +28,11 @@ import com.googlecode.mp4parser.boxes.mp4.objectdescriptors.SLConfigDescriptor;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
 
-@TargetApi(16)
 public class Track {
 
     private class SamplePresentationTime {
@@ -50,13 +47,13 @@ public class Track {
         }
     }
 
-    private long trackId = 0;
+    private long trackId;
     private ArrayList<Sample> samples = new ArrayList<>();
     private long duration = 0;
     private int[] sampleCompositions;
     private String handler;
-    private AbstractMediaHeaderBox headerBox = null;
-    private SampleDescriptionBox sampleDescriptionBox = null;
+    private AbstractMediaHeaderBox headerBox;
+    private SampleDescriptionBox sampleDescriptionBox;
     private LinkedList<Integer> syncSamples = null;
     private int timeScale;
     private Date creationTime = new Date();
@@ -65,7 +62,7 @@ public class Track {
     private float volume = 0;
     private long[] sampleDurations;
     private ArrayList<SamplePresentationTime> samplePresentationTimes = new ArrayList<>();
-    private boolean isAudio = false;
+    private boolean isAudio;
     private static Map<Integer, Integer> samplingFrequencyIndexMap = new HashMap<>();
     private boolean first = true;
 
@@ -84,12 +81,10 @@ public class Track {
         samplingFrequencyIndexMap.put(8000, 0xb);
     }
 
-    public Track(int id, MediaFormat format, boolean audio) throws Exception {
+    public Track(int id, MediaFormat format, boolean audio) {
         trackId = id;
         isAudio = audio;
         if (!isAudio) {
-            //sampleDurations.add((long) 3015);
-            //duration = 3015;
             width = format.getInteger(MediaFormat.KEY_WIDTH);
             height = format.getInteger(MediaFormat.KEY_HEIGHT);
             timeScale = 90000;
@@ -210,8 +205,6 @@ public class Track {
                 sampleDescriptionBox.addBox(visualSampleEntry);
             }
         } else {
-            //sampleDurations.add((long) 1024);
-            //duration = 1024;
             volume = 1;
             timeScale = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
             handler = "soun";
@@ -235,8 +228,12 @@ public class Track {
             decoderConfigDescriptor.setObjectTypeIndication(0x40);
             decoderConfigDescriptor.setStreamType(5);
             decoderConfigDescriptor.setBufferSizeDB(1536);
-            decoderConfigDescriptor.setMaxBitRate(96000);
-            decoderConfigDescriptor.setAvgBitRate(96000);
+            if (format.containsKey("max-bitrate")) {
+                decoderConfigDescriptor.setMaxBitRate(format.getInteger("max-bitrate"));
+            } else {
+                decoderConfigDescriptor.setMaxBitRate(96000);
+            }
+            decoderConfigDescriptor.setAvgBitRate(timeScale);
 
             AudioSpecificConfig audioSpecificConfig = new AudioSpecificConfig();
             audioSpecificConfig.setAudioObjectType(2);
@@ -269,16 +266,13 @@ public class Track {
 
     public void prepare() {
         ArrayList<SamplePresentationTime> original = new ArrayList<>(samplePresentationTimes);
-        Collections.sort(samplePresentationTimes, new Comparator<SamplePresentationTime>() {
-            @Override
-            public int compare(SamplePresentationTime o1, SamplePresentationTime o2) {
-                if (o1.presentationTime > o2.presentationTime) {
-                    return 1;
-                } else if (o1.presentationTime < o2.presentationTime) {
-                    return -1;
-                }
-                return 0;
+        Collections.sort(samplePresentationTimes, (o1, o2) -> {
+            if (o1.presentationTime > o2.presentationTime) {
+                return 1;
+            } else if (o1.presentationTime < o2.presentationTime) {
+                return -1;
             }
+            return 0;
         });
         long lastPresentationTimeUs = 0;
         sampleDurations = new long[samplePresentationTimes.size()];

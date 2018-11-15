@@ -14,34 +14,37 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.AnimatorSet;
 import android.animation.ObjectAnimator;
 import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.Dialog;
+import android.app.FragmentManager;
+import android.app.FragmentTransaction;
 import android.content.Context;
-import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Vibrator;
 import android.telephony.TelephonyManager;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
-import android.text.Selection;
-import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.TextWatcher;
-import android.text.method.LinkMovementMethod;
 import android.text.method.PasswordTransformationMethod;
 import android.text.style.ClickableSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
-import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -53,27 +56,49 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.wallet.Cart;
+import com.google.android.gms.wallet.FullWallet;
+import com.google.android.gms.wallet.FullWalletRequest;
+import com.google.android.gms.wallet.LineItem;
+import com.google.android.gms.wallet.MaskedWallet;
+import com.google.android.gms.wallet.MaskedWalletRequest;
+import com.google.android.gms.wallet.PaymentMethodTokenizationParameters;
+import com.google.android.gms.wallet.PaymentMethodTokenizationType;
+import com.google.android.gms.wallet.Wallet;
+import com.google.android.gms.wallet.WalletConstants;
+import com.google.android.gms.wallet.fragment.WalletFragment;
+import com.google.android.gms.wallet.fragment.WalletFragmentInitParams;
+import com.google.android.gms.wallet.fragment.WalletFragmentMode;
+import com.google.android.gms.wallet.fragment.WalletFragmentOptions;
+import com.google.android.gms.wallet.fragment.WalletFragmentStyle;
 import com.stripe.android.Stripe;
 import com.stripe.android.TokenCallback;
 import com.stripe.android.exception.APIConnectionException;
 import com.stripe.android.exception.APIException;
 import com.stripe.android.model.Card;
 import com.stripe.android.model.Token;
+import com.stripe.android.net.StripeApiHandler;
+import com.stripe.android.net.TokenParser;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 import org.telegram.PhoneFormat.PhoneFormat;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessageObject;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.R;
+import org.telegram.messenger.SRPHelper;
+import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
-import org.telegram.messenger.browser.Browser;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.RequestDelegate;
 import org.telegram.tgnet.TLObject;
@@ -96,6 +121,7 @@ import org.telegram.ui.Cells.TextPriceCell;
 import org.telegram.ui.Cells.TextSettingsCell;
 import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.ContextProgressView;
+import org.telegram.ui.Components.EditTextBoldCursor;
 import org.telegram.ui.Components.HintEditText;
 import org.telegram.ui.Components.LayoutHelper;
 
@@ -104,7 +130,6 @@ import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Locale;
 
@@ -134,18 +159,23 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     private final static int FIELD_SAVEDPASSWORD = 1;
     private final static int FIELDS_COUNT_SAVEDCARD = 2;
 
+    private final static int FIELD_ENTERPASSWORD = 0;
+    private final static int FIELD_REENTERPASSWORD = 1;
+    private final static int FIELD_ENTERPASSWORDEMAIL = 2;
+    private final static int FIELDS_COUNT_PASSWORD = 3;
+
     private ArrayList<String> countriesArray = new ArrayList<>();
     private HashMap<String, String> countriesMap = new HashMap<>();
     private HashMap<String, String> codesMap = new HashMap<>();
     private HashMap<String, String> phoneFormatMap = new HashMap<>();
 
-//    private GoogleApiClient googleApiClient;
-//    private WalletFragment walletFragment;
+    private GoogleApiClient googleApiClient;
 
-    private EditText[] inputFields;
+    private EditTextBoldCursor[] inputFields;
     private RadioCell[] radioCells;
     private ActionBarMenuItem doneItem;
     private ContextProgressView progressView;
+    private ContextProgressView progressViewButton;
     private AnimatorSet doneItemAnimation;
     private WebView webView;
     private ScrollView scrollView;
@@ -155,8 +185,9 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     private ArrayList<View> dividers = new ArrayList<>();
     private ShadowSectionCell sectionCell[] = new ShadowSectionCell[3];
     private TextCheckCell checkCell1;
-    private TextInfoPrivacyCell bottomCell[] = new TextInfoPrivacyCell[2];
+    private TextInfoPrivacyCell bottomCell[] = new TextInfoPrivacyCell[3];
     private TextSettingsCell settingsCell1;
+    private FrameLayout androidPayContainer;
     private LinearLayout linearLayout2;
 
     private PaymentFormActivityDelegate delegate;
@@ -164,12 +195,20 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     private TextView payTextView;
     private FrameLayout bottomLayout;
     private PaymentInfoCell paymentInfoCell;
-    private TextDetailSettingsCell detailSettingsCell[] = new TextDetailSettingsCell[6];
+    private TextDetailSettingsCell detailSettingsCell[] = new TextDetailSettingsCell[7];
+
+    private TLRPC.TL_account_password currentPassword;
+    private boolean waitingForEmail;
+    private Runnable shortPollRunnable;
+    private boolean loadingPasswordInfo;
+    private PaymentFormActivity passwordFragment;
 
     private boolean need_card_country;
     private boolean need_card_postcode;
     private boolean need_card_name;
     private String stripeApiKey;
+
+    private TLRPC.User botUser;
 
     private boolean ignoreOnTextChange;
     private boolean ignoreOnPhoneChange;
@@ -184,62 +223,56 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     private String cardName;
     private boolean webviewLoading;
     private String countryName;
+    private String totalPriceDecimal;
     private TLRPC.TL_payments_paymentForm paymentForm;
     private TLRPC.TL_payments_validatedRequestedInfo requestedInfo;
     private TLRPC.TL_shippingOption shippingOption;
     private TLRPC.TL_payments_validateRequestedInfo validateRequest;
+    private TLRPC.TL_inputPaymentCredentialsAndroidPay androidPayCredentials;
+    private String androidPayPublicKey;
+    private int androidPayBackgroundColor;
+    private boolean androidPayBlackTheme;
     private MessageObject messageObject;
     private boolean donePressed;
     private boolean canceled;
+
+    private boolean isWebView;
 
     private boolean saveShippingInfo;
     private boolean saveCardInfo;
 
     private final static int done_button = 1;
 
+    private static final int LOAD_MASKED_WALLET_REQUEST_CODE = 1000;
+    private static final int LOAD_FULL_WALLET_REQUEST_CODE = 1001;
+    private final static int fragment_container_id = 4000;
+
     private interface PaymentFormActivityDelegate {
-        void didSelectNewCard(String tokenJson, String card, boolean saveCard);
+        boolean didSelectNewCard(String tokenJson, String card, boolean saveCard, TLRPC.TL_inputPaymentCredentialsAndroidPay androidPay);
+        void onFragmentDestroyed();
+        void currentPasswordUpdated(TLRPC.TL_account_password password);
     }
 
     private class TelegramWebviewProxy {
         @JavascriptInterface
         public void postEvent(final String eventName, final String eventData) {
-            AndroidUtilities.runOnUIThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (getParentActivity() == null) {
-                        return;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (getParentActivity() == null) {
+                    return;
+                }
+                if (eventName.equals("payment_form_submit")) {
+                    try {
+                        JSONObject jsonObject = new JSONObject(eventData);
+                        JSONObject response = jsonObject.getJSONObject("credentials");
+                        paymentJson = response.toString();
+                        cardName = jsonObject.getString("title");
+                    } catch (Throwable e) {
+                        paymentJson = eventData;
+                        FileLog.e(e);
                     }
-                    if (eventName.equals("payment_form_submit")) {
-                        try {
-                            JSONObject jsonObject = new JSONObject(eventData);
-                            JSONObject response = jsonObject.getJSONObject("credentials");
-                            paymentJson = response.toString();
-                            cardName = jsonObject.getString("title");
-                        } catch (Throwable e) {
-                            paymentJson = eventData;
-                            FileLog.e(e);
-                        }
-                        goToNextStep();
-                    }
+                    goToNextStep();
                 }
             });
-        }
-    }
-
-    private static class LinkMovementMethodMy extends LinkMovementMethod {
-        @Override
-        public boolean onTouchEvent(TextView widget, Spannable buffer, MotionEvent event) {
-            try {
-                boolean result = super.onTouchEvent(widget, buffer, event);
-                if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    Selection.removeSelection(buffer);
-                }
-                return result;
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
-            return false;
         }
     }
 
@@ -265,9 +298,9 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         paymentForm.users = receipt.users;
         shippingOption = receipt.shipping;
         messageObject = message;
-        TLRPC.User user = MessagesController.getInstance().getUser(receipt.bot_id);
-        if (user != null) {
-            currentBotName = user.first_name;
+        botUser = MessagesController.getInstance(currentAccount).getUser(receipt.bot_id);
+        if (botUser != null) {
+            currentBotName = botUser.first_name;
         } else {
             currentBotName = "";
         }
@@ -284,13 +317,13 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         if (form.invoice.shipping_address_requested || form.invoice.email_requested || form.invoice.name_requested || form.invoice.phone_requested) {
             step = 0;
         } else if (form.saved_credentials != null) {
-            if (UserConfig.tmpPassword != null) {
-                if (UserConfig.tmpPassword.valid_until < ConnectionsManager.getInstance().getCurrentTime() + 60) {
-                    UserConfig.tmpPassword = null;
-                    UserConfig.saveConfig(false);
+            if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
+                if (UserConfig.getInstance(currentAccount).tmpPassword.valid_until < ConnectionsManager.getInstance(currentAccount).getCurrentTime() + 60) {
+                    UserConfig.getInstance(currentAccount).tmpPassword = null;
+                    UserConfig.getInstance(currentAccount).saveConfig(false);
                 }
             }
-            if (UserConfig.tmpPassword != null) {
+            if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
                 step = 4;
             } else {
                 step = 3;
@@ -298,28 +331,45 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         } else {
             step = 2;
         }
-        init(form, message, step, null, null, null, null, null, false);
+        init(form, message, step, null, null, null, null, null, false, null);
     }
 
-    private PaymentFormActivity(TLRPC.TL_payments_paymentForm form, MessageObject message, int step, TLRPC.TL_payments_validatedRequestedInfo validatedRequestedInfo, TLRPC.TL_shippingOption shipping, String tokenJson, String card, TLRPC.TL_payments_validateRequestedInfo request, boolean saveCard) {
-        init(form, message, step, validatedRequestedInfo, shipping, tokenJson, card, request, saveCard);
+    private PaymentFormActivity(TLRPC.TL_payments_paymentForm form, MessageObject message, int step, TLRPC.TL_payments_validatedRequestedInfo validatedRequestedInfo, TLRPC.TL_shippingOption shipping, String tokenJson, String card, TLRPC.TL_payments_validateRequestedInfo request, boolean saveCard, TLRPC.TL_inputPaymentCredentialsAndroidPay androidPay) {
+        init(form, message, step, validatedRequestedInfo, shipping, tokenJson, card, request, saveCard, androidPay);
+    }
+
+    private void setCurrentPassword(TLRPC.TL_account_password password) {
+        if (password.has_password) {
+            if (getParentActivity() == null) {
+                return;
+            }
+            goToNextStep();
+        } else {
+            currentPassword = password;
+            if (currentPassword != null) {
+                waitingForEmail = !TextUtils.isEmpty(currentPassword.email_unconfirmed_pattern);
+            }
+            updatePasswordFields();
+        }
     }
 
     private void setDelegate(PaymentFormActivityDelegate paymentFormActivityDelegate) {
         delegate = paymentFormActivityDelegate;
     }
 
-    private void init(TLRPC.TL_payments_paymentForm form, MessageObject message, int step, TLRPC.TL_payments_validatedRequestedInfo validatedRequestedInfo, TLRPC.TL_shippingOption shipping, String tokenJson, String card, TLRPC.TL_payments_validateRequestedInfo request, boolean saveCard) {
+    private void init(TLRPC.TL_payments_paymentForm form, MessageObject message, int step, TLRPC.TL_payments_validatedRequestedInfo validatedRequestedInfo, TLRPC.TL_shippingOption shipping, String tokenJson, String card, TLRPC.TL_payments_validateRequestedInfo request, boolean saveCard, TLRPC.TL_inputPaymentCredentialsAndroidPay androidPay) {
         currentStep = step;
         paymentJson = tokenJson;
+        androidPayCredentials = androidPay;
         requestedInfo = validatedRequestedInfo;
         paymentForm = form;
         shippingOption = shipping;
         messageObject = message;
         saveCardInfo = saveCard;
-        TLRPC.User user = MessagesController.getInstance().getUser(form.bot_id);
-        if (user != null) {
-            currentBotName = user.first_name;
+        isWebView = !"stripe".equals(paymentForm.native_provider);
+        botUser = MessagesController.getInstance(currentAccount).getUser(form.bot_id);
+        if (botUser != null) {
+            currentBotName = botUser.first_name;
         } else {
             currentBotName = "";
         }
@@ -346,25 +396,25 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         AndroidUtilities.requestAdjustResize(getParentActivity(), classGuid);
         if (Build.VERSION.SDK_INT >= 23) {
             try {
-                if (currentStep == 2) {
+                if ((currentStep == 2 || currentStep == 6) && !paymentForm.invoice.test) {
                     getParentActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-                } else if (UserConfig.passcodeHash.length() == 0 || UserConfig.allowScreenCapture) {
+                } else if (SharedConfig.passcodeHash.length() == 0 || SharedConfig.allowScreenCapture) {
                     getParentActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
                 }
             } catch (Throwable e) {
                 FileLog.e(e);
             }
         }
-//        if (googleApiClient != null) {
-//            googleApiClient.connect();
-//        }
+        if (googleApiClient != null) {
+            googleApiClient.connect();
+        }
     }
 
     @Override
     public void onPause() {
-//        if (googleApiClient != null) {
-//            googleApiClient.disconnect();
-//        }
+        if (googleApiClient != null) {
+            googleApiClient.disconnect();
+        }
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
@@ -390,6 +440,8 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             } else {
                 actionBar.setTitle(LocaleController.getString("PaymentReceipt", R.string.PaymentReceipt));
             }
+        } else if (currentStep == 6) {
+            actionBar.setTitle(LocaleController.getString("PaymentPassword", R.string.PaymentPassword));
         }
 
         actionBar.setBackButtonImage(R.drawable.ic_ab_back);
@@ -425,6 +477,8 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                         sendCardData();
                     } else if (currentStep == 3) {
                         checkPassword();
+                    } else if (currentStep == 6) {
+                        sendSavePassword(false);
                     }
                 }
             }
@@ -432,7 +486,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
 
         ActionBarMenu menu = actionBar.createMenu();
 
-        if (currentStep == 0 || currentStep == 1 || currentStep == 2 || currentStep == 3) {
+        if (currentStep == 0 || currentStep == 1 || currentStep == 2 || currentStep == 3 || currentStep == 4 || currentStep == 6) {
             doneItem = menu.addItemWithWidth(done_button, R.drawable.ic_done, AndroidUtilities.dp(56));
             progressView = new ContextProgressView(context, 1);
             doneItem.addView(progressView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
@@ -474,14 +528,9 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 FileLog.e(e);
             }
 
-            Collections.sort(countriesArray, new Comparator<String>() {
-                @Override
-                public int compare(String lhs, String rhs) {
-                    return lhs.compareTo(rhs);
-                }
-            });
+            Collections.sort(countriesArray, String::compareTo);
 
-            inputFields = new EditText[FIELDS_COUNT_ADDRESS];
+            inputFields = new EditTextBoldCursor[FIELDS_COUNT_ADDRESS];
             for (int a = 0; a < FIELDS_COUNT_ADDRESS; a++) {
                 if (a == FIELD_STREET1) {
                     headerCell[0] = new HeaderCell(context);
@@ -529,34 +578,30 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 if (a == FIELD_PHONE) {
                     inputFields[a] = new HintEditText(context);
                 } else {
-                    inputFields[a] = new EditText(context);
+                    inputFields[a] = new EditTextBoldCursor(context);
                 }
                 inputFields[a].setTag(a);
                 inputFields[a].setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
                 inputFields[a].setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
                 inputFields[a].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
                 inputFields[a].setBackgroundDrawable(null);
-                AndroidUtilities.clearCursorDrawable(inputFields[a]);
+                inputFields[a].setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                inputFields[a].setCursorSize(AndroidUtilities.dp(20));
+                inputFields[a].setCursorWidth(1.5f);
                 if (a == FIELD_COUNTRY) {
-                    inputFields[a].setOnTouchListener(new View.OnTouchListener() {
-                        @Override
-                        public boolean onTouch(View v, MotionEvent event) {
-                            if (getParentActivity() == null) {
-                                return false;
-                            }
-                            if (event.getAction() == MotionEvent.ACTION_UP) {
-                                CountrySelectActivity fragment = new CountrySelectActivity(false);
-                                fragment.setCountrySelectActivityDelegate(new CountrySelectActivity.CountrySelectActivityDelegate() {
-                                    @Override
-                                    public void didSelectCountry(String name, String shortName) {
-                                        inputFields[FIELD_COUNTRY].setText(name);
-                                        countryName = shortName;
-                                    }
-                                });
-                                presentFragment(fragment);
-                            }
-                            return true;
+                    inputFields[a].setOnTouchListener((v, event) -> {
+                        if (getParentActivity() == null) {
+                            return false;
                         }
+                        if (event.getAction() == MotionEvent.ACTION_UP) {
+                            CountrySelectActivity fragment = new CountrySelectActivity(false);
+                            fragment.setCountrySelectActivityDelegate((name, shortName) -> {
+                                inputFields[FIELD_COUNTRY].setText(name);
+                                countryName = shortName;
+                            });
+                            presentFragment(fragment);
+                        }
+                        return true;
                     });
                     inputFields[a].setInputType(0);
                 }
@@ -791,40 +836,61 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     container.addView(inputFields[a], LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP, 17, 12, 17, 6));
                 }
 
-                inputFields[a].setOnEditorActionListener(new TextView.OnEditorActionListener() {
-                    @Override
-                    public boolean onEditorAction(TextView textView, int i, KeyEvent keyEvent) {
-                        if (i == EditorInfo.IME_ACTION_NEXT) {
-                            int num = (Integer) textView.getTag();
-                            while (num + 1 < inputFields.length) {
-                                num++;
-                                if (num != FIELD_COUNTRY && ((View) inputFields[num].getParent()).getVisibility() == View.VISIBLE) {
-                                    inputFields[num].requestFocus();
-                                    break;
-                                }
+                inputFields[a].setOnEditorActionListener((textView, i, keyEvent) -> {
+                    if (i == EditorInfo.IME_ACTION_NEXT) {
+                        int num = (Integer) textView.getTag();
+                        while (num + 1 < inputFields.length) {
+                            num++;
+                            if (num != FIELD_COUNTRY && ((View) inputFields[num].getParent()).getVisibility() == View.VISIBLE) {
+                                inputFields[num].requestFocus();
+                                break;
                             }
-                            return true;
-                        } else if (i == EditorInfo.IME_ACTION_DONE) {
-                            doneItem.performClick();
-                            return true;
                         }
-                        return false;
+                        return true;
+                    } else if (i == EditorInfo.IME_ACTION_DONE) {
+                        doneItem.performClick();
+                        return true;
                     }
+                    return false;
                 });
                 if (a == FIELD_PHONE) {
-                    sectionCell[1] = new ShadowSectionCell(context);
-                    linearLayout2.addView(sectionCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                    if (paymentForm.invoice.email_to_provider || paymentForm.invoice.phone_to_provider) {
+                        TLRPC.User providerUser = null;
+                        for (int b = 0; b < paymentForm.users.size(); b++) {
+                            TLRPC.User user = paymentForm.users.get(b);
+                            if (user.id == paymentForm.provider_id) {
+                                providerUser = user;
+                            }
+                        }
+                        final String providerName;
+                        if (providerUser != null) {
+                            providerName = ContactsController.formatName(providerUser.first_name, providerUser.last_name);
+                        } else {
+                            providerName = "";
+                        }
+
+                        bottomCell[1] = new TextInfoPrivacyCell(context);
+                        bottomCell[1].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
+                        linearLayout2.addView(bottomCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                        if (paymentForm.invoice.email_to_provider && paymentForm.invoice.phone_to_provider) {
+                            bottomCell[1].setText(LocaleController.formatString("PaymentPhoneEmailToProvider", R.string.PaymentPhoneEmailToProvider, providerName));
+                        } else if (paymentForm.invoice.email_to_provider) {
+                            bottomCell[1].setText(LocaleController.formatString("PaymentEmailToProvider", R.string.PaymentEmailToProvider, providerName));
+                        } else {
+                            bottomCell[1].setText(LocaleController.formatString("PaymentPhoneToProvider", R.string.PaymentPhoneToProvider, providerName));
+                        }
+                    } else {
+                        sectionCell[1] = new ShadowSectionCell(context);
+                        linearLayout2.addView(sectionCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                    }
 
                     checkCell1 = new TextCheckCell(context);
                     checkCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                     checkCell1.setTextAndCheck(LocaleController.getString("PaymentShippingSave", R.string.PaymentShippingSave), saveShippingInfo, false);
                     linearLayout2.addView(checkCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-                    checkCell1.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            saveShippingInfo = !saveShippingInfo;
-                            checkCell1.setChecked(saveShippingInfo);
-                        }
+                    checkCell1.setOnClickListener(v -> {
+                        saveShippingInfo = !saveShippingInfo;
+                        checkCell1.setChecked(saveShippingInfo);
                     });
 
                     bottomCell[0] = new TextInfoPrivacyCell(context);
@@ -854,7 +920,11 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 inputFields[FIELD_POSTCODE].setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
             }
 
-            sectionCell[1].setVisibility(paymentForm.invoice.name_requested || paymentForm.invoice.phone_requested || paymentForm.invoice.email_requested ? View.VISIBLE : View.GONE);
+            if (sectionCell[1] != null) {
+                sectionCell[1].setVisibility(paymentForm.invoice.name_requested || paymentForm.invoice.phone_requested || paymentForm.invoice.email_requested ? View.VISIBLE : View.GONE);
+            } else if (bottomCell[1] != null) {
+                bottomCell[1].setVisibility(paymentForm.invoice.name_requested || paymentForm.invoice.phone_requested || paymentForm.invoice.email_requested ? View.VISIBLE : View.GONE);
+            }
             headerCell[1].setVisibility(paymentForm.invoice.name_requested || paymentForm.invoice.phone_requested || paymentForm.invoice.email_requested ? View.VISIBLE : View.GONE);
             if (!paymentForm.invoice.shipping_address_requested) {
                 headerCell[0].setVisibility(View.GONE);
@@ -896,13 +966,53 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 }
             }
         } else if (currentStep == 2) {
-            if (!"stripe".equals(paymentForm.native_provider)) {
+            if (paymentForm.native_params != null) {
+                try {
+                    JSONObject jsonObject = new JSONObject(paymentForm.native_params.data);
+                    try {
+                        String androidPayKey = jsonObject.getString("android_pay_public_key");
+                        if (!TextUtils.isEmpty(androidPayKey)) {
+                            androidPayPublicKey = androidPayKey;
+                        }
+                    } catch (Exception e) {
+                        androidPayPublicKey = null;
+                    }
+                    try {
+                        androidPayBackgroundColor = jsonObject.getInt("android_pay_bgcolor") | 0xff000000;
+                    } catch (Exception e) {
+                        androidPayBackgroundColor = 0xffffffff;
+                    }
+                    try {
+                        androidPayBlackTheme = jsonObject.getBoolean("android_pay_inverse");
+                    } catch (Exception e) {
+                        androidPayBlackTheme = false;
+                    }
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+            }
+            if (isWebView) {
+                if (androidPayPublicKey != null) {
+                    initAndroidPay(context);
+                }
+                androidPayContainer = new FrameLayout(context);
+                androidPayContainer.setId(fragment_container_id);
+                androidPayContainer.setBackgroundDrawable(Theme.getSelectorDrawable(true));
+                androidPayContainer.setVisibility(View.GONE);
+                linearLayout2.addView(androidPayContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48));
+
                 webviewLoading = true;
-                showEditDoneProgress(true);
+                showEditDoneProgress(true, true);
                 progressView.setVisibility(View.VISIBLE);
                 doneItem.setEnabled(false);
                 doneItem.getImageView().setVisibility(View.INVISIBLE);
-                webView = new WebView(context);
+                webView = new WebView(context) {
+                    @Override
+                    public boolean onTouchEvent(MotionEvent event) {
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                        return super.onTouchEvent(event);
+                    }
+                };
                 webView.getSettings().setJavaScriptEnabled(true);
                 webView.getSettings().setDomStorageEnabled(true);
 
@@ -910,9 +1020,10 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     webView.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                     CookieManager cookieManager = CookieManager.getInstance();
                     cookieManager.setAcceptThirdPartyCookies(webView, true);
+                }
+                if (Build.VERSION.SDK_INT >= 17) {
                     webView.addJavascriptInterface(new TelegramWebviewProxy(), "TelegramWebviewProxy");
                 }
-
                 webView.setWebViewClient(new WebViewClient() {
                     @Override
                     public void onLoadResource(WebView view, String url) {
@@ -923,7 +1034,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     public void onPageFinished(WebView view, String url) {
                         super.onPageFinished(view, url);
                         webviewLoading = false;
-                        showEditDoneProgress(false);
+                        showEditDoneProgress(true, false);
                         updateSavePaymentField();
                     }
                 });
@@ -937,12 +1048,9 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 checkCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 checkCell1.setTextAndCheck(LocaleController.getString("PaymentCardSavePaymentInformation", R.string.PaymentCardSavePaymentInformation), saveCardInfo, false);
                 linearLayout2.addView(checkCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-                checkCell1.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        saveCardInfo = !saveCardInfo;
-                        checkCell1.setChecked(saveCardInfo);
-                    }
+                checkCell1.setOnClickListener(v -> {
+                    saveCardInfo = !saveCardInfo;
+                    checkCell1.setChecked(saveCardInfo);
                 });
 
                 bottomCell[0] = new TextInfoPrivacyCell(context);
@@ -950,72 +1058,37 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 updateSavePaymentField();
                 linearLayout2.addView(bottomCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
             } else {
-                try {
-                    JSONObject jsonObject = new JSONObject(paymentForm.native_params.data);
+                if (paymentForm.native_params != null) {
                     try {
-                        need_card_country = jsonObject.getBoolean("need_country");
+                        JSONObject jsonObject = new JSONObject(paymentForm.native_params.data);
+                        try {
+                            need_card_country = jsonObject.getBoolean("need_country");
+                        } catch (Exception e) {
+                            need_card_country = false;
+                        }
+                        try {
+                            need_card_postcode = jsonObject.getBoolean("need_zip");
+                        } catch (Exception e) {
+                            need_card_postcode = false;
+                        }
+                        try {
+                            need_card_name = jsonObject.getBoolean("need_cardholder_name");
+                        } catch (Exception e) {
+                            need_card_name = false;
+                        }
+                        try {
+                            stripeApiKey = jsonObject.getString("publishable_key");
+                        } catch (Exception e) {
+                            stripeApiKey = "";
+                        }
                     } catch (Exception e) {
-                        need_card_country = false;
+                        FileLog.e(e);
                     }
-                    try {
-                        need_card_postcode = jsonObject.getBoolean("need_zip");
-                    } catch (Exception e) {
-                        need_card_postcode = false;
-                    }
-                    try {
-                        need_card_name = jsonObject.getBoolean("need_cardholder_name");
-                    } catch (Exception e) {
-                        need_card_name = false;
-                    }
-                    try {
-                        stripeApiKey = jsonObject.getString("publishable_key");
-                    } catch (Exception e) {
-                        stripeApiKey = "";
-                    }
-                } catch (Exception e) {
-                    FileLog.e(e);
                 }
 
-                /*googleApiClient = new GoogleApiClient.Builder(context)
-                        .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
-                            @Override
-                            public void onConnected(Bundle bundle) {
+                initAndroidPay(context);
 
-                            }
-
-                            @Override
-                            public void onConnectionSuspended(int i) {
-
-                            }
-                        })
-                        .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
-                            @Override
-                            public void onConnectionFailed(ConnectionResult connectionResult) {
-
-                            }
-                        })
-                        .addApi(Wallet.API, new Wallet.WalletOptions.Builder()
-                                .setEnvironment(WalletConstants.ENVIRONMENT_TEST)
-                                .setTheme(WalletConstants.THEME_LIGHT)
-                                .build())
-                        .build();
-
-                Wallet.Payments.isReadyToPay(googleApiClient).setResultCallback(
-                        new ResultCallback<BooleanResult>() {
-                            @Override
-                            public void onResult(BooleanResult booleanResult) {
-                                if (booleanResult.getStatus().isSuccess()) {
-                                    if (booleanResult.getValue()) {
-                                        showAndroidPay(false);
-                                    }
-                                } else {
-
-                                }
-                            }
-                        }
-                );*/
-
-                inputFields = new EditText[FIELDS_COUNT_CARD];
+                inputFields = new EditTextBoldCursor[FIELDS_COUNT_CARD];
                 for (int a = 0; a < FIELDS_COUNT_CARD; a++) {
                     if (a == FIELD_CARD) {
                         headerCell[0] = new HeaderCell(context);
@@ -1034,21 +1107,16 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     linearLayout2.addView(container, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48));
                     container.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
 
-                    if (allowDivider) {
-                        View divider = new View(context);
-                        dividers.add(divider);
-                        divider.setBackgroundColor(Theme.getColor(Theme.key_divider));
-                        container.addView(divider, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.LEFT | Gravity.BOTTOM));
-                    }
-
                     View.OnTouchListener onTouchListener = null;
-                    inputFields[a] = new EditText(context);
+                    inputFields[a] = new EditTextBoldCursor(context);
                     inputFields[a].setTag(a);
                     inputFields[a].setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
                     inputFields[a].setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
                     inputFields[a].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
                     inputFields[a].setBackgroundDrawable(null);
-                    AndroidUtilities.clearCursorDrawable(inputFields[a]);
+                    inputFields[a].setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                    inputFields[a].setCursorSize(AndroidUtilities.dp(20));
+                    inputFields[a].setCursorWidth(1.5f);
                     if (a == FIELD_CVV) {
                         InputFilter[] inputFilters = new InputFilter[1];
                         inputFilters[0] = new InputFilter.LengthFilter(3);
@@ -1059,24 +1127,16 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     } else if (a == FIELD_CARD) {
                         inputFields[a].setInputType(InputType.TYPE_CLASS_NUMBER);
                     } else if (a == FIELD_CARD_COUNTRY) {
-                        inputFields[a].setOnTouchListener(new View.OnTouchListener() {
-                            @Override
-                            public boolean onTouch(View v, MotionEvent event) {
-                                if (getParentActivity() == null) {
-                                    return false;
-                                }
-                                if (event.getAction() == MotionEvent.ACTION_UP) {
-                                    CountrySelectActivity fragment = new CountrySelectActivity(false);
-                                    fragment.setCountrySelectActivityDelegate(new CountrySelectActivity.CountrySelectActivityDelegate() {
-                                        @Override
-                                        public void didSelectCountry(String name, String shortName) {
-                                            inputFields[FIELD_CARD_COUNTRY].setText(name);
-                                        }
-                                    });
-                                    presentFragment(fragment);
-                                }
-                                return true;
+                        inputFields[a].setOnTouchListener((v, event) -> {
+                            if (getParentActivity() == null) {
+                                return false;
                             }
+                            if (event.getAction() == MotionEvent.ACTION_UP) {
+                                CountrySelectActivity fragment = new CountrySelectActivity(false);
+                                fragment.setCountrySelectActivityDelegate((name, shortName) -> inputFields[FIELD_CARD_COUNTRY].setText(name));
+                                presentFragment(fragment);
+                            }
+                            return true;
                         });
                         inputFields[a].setInputType(0);
                     } else if (a == FIELD_EXPIRE_DATE) {
@@ -1383,28 +1443,25 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     inputFields[a].setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
                     container.addView(inputFields[a], LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP, 17, 12, 17, 6));
 
-                    inputFields[a].setOnEditorActionListener(new TextView.OnEditorActionListener() {
-                        @Override
-                        public boolean onEditorAction(TextView textView, int i, KeyEvent keyEvent) {
-                            if (i == EditorInfo.IME_ACTION_NEXT) {
-                                int num = (Integer) textView.getTag();
-                                while (num + 1 < inputFields.length) {
+                    inputFields[a].setOnEditorActionListener((textView, i, keyEvent) -> {
+                        if (i == EditorInfo.IME_ACTION_NEXT) {
+                            int num = (Integer) textView.getTag();
+                            while (num + 1 < inputFields.length) {
+                                num++;
+                                if (num == FIELD_CARD_COUNTRY) {
                                     num++;
-                                    if (num == FIELD_CARD_COUNTRY) {
-                                        num++;
-                                    }
-                                    if (((View) inputFields[num].getParent()).getVisibility() == View.VISIBLE) {
-                                        inputFields[num].requestFocus();
-                                        break;
-                                    }
                                 }
-                                return true;
-                            } else if (i == EditorInfo.IME_ACTION_DONE) {
-                                doneItem.performClick();
-                                return true;
+                                if (((View) inputFields[num].getParent()).getVisibility() == View.VISIBLE) {
+                                    inputFields[num].requestFocus();
+                                    break;
+                                }
                             }
-                            return false;
+                            return true;
+                        } else if (i == EditorInfo.IME_ACTION_DONE) {
+                            doneItem.performClick();
+                            return true;
                         }
+                        return false;
                     });
                     if (a == FIELD_CVV) {
                         sectionCell[0] = new ShadowSectionCell(context);
@@ -1417,18 +1474,28 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                         checkCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                         checkCell1.setTextAndCheck(LocaleController.getString("PaymentCardSavePaymentInformation", R.string.PaymentCardSavePaymentInformation), saveCardInfo, false);
                         linearLayout2.addView(checkCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-                        checkCell1.setOnClickListener(new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                saveCardInfo = !saveCardInfo;
-                                checkCell1.setChecked(saveCardInfo);
-                            }
+                        checkCell1.setOnClickListener(v -> {
+                            saveCardInfo = !saveCardInfo;
+                            checkCell1.setChecked(saveCardInfo);
                         });
 
                         bottomCell[0] = new TextInfoPrivacyCell(context);
                         bottomCell[0].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
                         updateSavePaymentField();
                         linearLayout2.addView(bottomCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                    } else if (a == FIELD_CARD) {
+                        androidPayContainer = new FrameLayout(context);
+                        androidPayContainer.setId(fragment_container_id);
+                        androidPayContainer.setBackgroundDrawable(Theme.getSelectorDrawable(true));
+                        androidPayContainer.setVisibility(View.GONE);
+                        container.addView(androidPayContainer, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL | Gravity.RIGHT, 0, 0, 4, 0));
+                    }
+
+                    if (allowDivider) {
+                        View divider = new View(context);
+                        dividers.add(divider);
+                        divider.setBackgroundColor(Theme.getColor(Theme.key_divider));
+                        container.addView(divider, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.LEFT | Gravity.BOTTOM));
                     }
 
                     if (a == FIELD_CARD_COUNTRY && !need_card_country || a == FIELD_CARD_POSTCODE && !need_card_postcode || a == FIELD_CARDNAME && !need_card_name) {
@@ -1444,18 +1511,6 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 } else {
                     inputFields[FIELD_CVV].setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
                 }
-
-                /*settingsCell1 = new TextSettingsCell(context);
-                settingsCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
-                settingsCell1.setText("Android Pay", false);
-                settingsCell1.setVisibility(View.GONE);
-                linearLayout2.addView(settingsCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-                settingsCell1.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        showAndroidPay(true);
-                    }
-                });*/
             }
         } else if (currentStep == 1) {
             int count = requestedInfo.shipping_options.size();
@@ -1466,13 +1521,10 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 radioCells[a].setTag(a);
                 radioCells[a].setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 radioCells[a].setText(String.format("%s - %s", getTotalPriceString(shippingOption.prices), shippingOption.title), a == 0, a != count - 1);
-                radioCells[a].setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        int num = (Integer) v.getTag();
-                        for (int a = 0; a < radioCells.length; a++) {
-                            radioCells[a].setChecked(num == a, true);
-                        }
+                radioCells[a].setOnClickListener(v -> {
+                    int num = (Integer) v.getTag();
+                    for (int a1 = 0; a1 < radioCells.length; a1++) {
+                        radioCells[a1].setChecked(num == a1, true);
                     }
                 });
                 linearLayout2.addView(radioCells[a]);
@@ -1481,7 +1533,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             bottomCell[0].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
             linearLayout2.addView(bottomCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
         } else if (currentStep == 3) {
-            inputFields = new EditText[FIELDS_COUNT_SAVEDCARD];
+            inputFields = new EditTextBoldCursor[FIELDS_COUNT_SAVEDCARD];
             for (int a = 0; a < FIELDS_COUNT_SAVEDCARD; a++) {
                 if (a == FIELD_SAVEDCARD) {
                     headerCell[0] = new HeaderCell(context);
@@ -1509,20 +1561,17 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     container.addView(divider, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.LEFT | Gravity.BOTTOM));
                 }
 
-                inputFields[a] = new EditText(context);
+                inputFields[a] = new EditTextBoldCursor(context);
                 inputFields[a].setTag(a);
                 inputFields[a].setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
                 inputFields[a].setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
                 inputFields[a].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
                 inputFields[a].setBackgroundDrawable(null);
-                AndroidUtilities.clearCursorDrawable(inputFields[a]);
+                inputFields[a].setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                inputFields[a].setCursorSize(AndroidUtilities.dp(20));
+                inputFields[a].setCursorWidth(1.5f);
                 if (a == FIELD_SAVEDCARD) {
-                    inputFields[a].setOnTouchListener(new View.OnTouchListener() {
-                        @Override
-                        public boolean onTouch(View v, MotionEvent event) {
-                            return true;
-                        }
-                    });
+                    inputFields[a].setOnTouchListener((v, event) -> true);
                     inputFields[a].setInputType(0);
                 } else {
                     inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -1543,15 +1592,12 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 inputFields[a].setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
                 container.addView(inputFields[a], LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP, 17, 12, 17, 6));
 
-                inputFields[a].setOnEditorActionListener(new TextView.OnEditorActionListener() {
-                    @Override
-                    public boolean onEditorAction(TextView textView, int i, KeyEvent keyEvent) {
-                        if (i == EditorInfo.IME_ACTION_DONE) {
-                            doneItem.performClick();
-                            return true;
-                        }
-                        return false;
+                inputFields[a].setOnEditorActionListener((textView, i, keyEvent) -> {
+                    if (i == EditorInfo.IME_ACTION_DONE) {
+                        doneItem.performClick();
+                        return true;
                     }
+                    return false;
                 });
                 if (a == FIELD_SAVEDPASSWORD) {
                     bottomCell[0] = new TextInfoPrivacyCell(context);
@@ -1563,12 +1609,9 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                     settingsCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                     settingsCell1.setText(LocaleController.getString("PaymentConfirmationNewCard", R.string.PaymentConfirmationNewCard), false);
                     linearLayout2.addView(settingsCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-                    settingsCell1.setOnClickListener(new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            passwordOk = false;
-                            goToNextStep();
-                        }
+                    settingsCell1.setOnClickListener(v -> {
+                        passwordOk = false;
+                        goToNextStep();
                     });
 
                     bottomCell[1] = new TextInfoPrivacyCell(context);
@@ -1585,8 +1628,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             sectionCell[0] = new ShadowSectionCell(context);
             linearLayout2.addView(sectionCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
-            ArrayList<TLRPC.TL_labeledPrice> arrayList = new ArrayList<>();
-            arrayList.addAll(paymentForm.invoice.prices);
+            ArrayList<TLRPC.TL_labeledPrice> arrayList = new ArrayList<>(paymentForm.invoice.prices);
             if (shippingOption != null) {
                 arrayList.addAll(shippingOption.prices);
             }
@@ -1616,59 +1658,86 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             detailSettingsCell[0].setTextAndValue(cardName, LocaleController.getString("PaymentCheckoutMethod", R.string.PaymentCheckoutMethod), true);
             linearLayout2.addView(detailSettingsCell[0]);
             if (currentStep == 4) {
-                detailSettingsCell[0].setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        PaymentFormActivity activity = new PaymentFormActivity(paymentForm, messageObject, 2, requestedInfo, shippingOption, null, cardName, validateRequest, saveCardInfo);
-                        activity.setDelegate(new PaymentFormActivityDelegate() {
-                            @Override
-                            public void didSelectNewCard(String tokenJson, String card, boolean saveCard) {
-                                paymentJson = tokenJson;
-                                saveCardInfo = saveCard;
-                                cardName = card;
-                                detailSettingsCell[0].setTextAndValue(cardName, LocaleController.getString("PaymentCheckoutMethod", R.string.PaymentCheckoutMethod), true);
-                            }
-                        });
-                        presentFragment(activity);
-                    }
+                detailSettingsCell[0].setOnClickListener(v -> {
+                    PaymentFormActivity activity = new PaymentFormActivity(paymentForm, messageObject, 2, requestedInfo, shippingOption, null, cardName, validateRequest, saveCardInfo, null);
+                    activity.setDelegate(new PaymentFormActivityDelegate() {
+                        @Override
+                        public boolean didSelectNewCard(String tokenJson, String card, boolean saveCard, TLRPC.TL_inputPaymentCredentialsAndroidPay androidPay) {
+                            paymentForm.saved_credentials = null;
+                            paymentJson = tokenJson;
+                            saveCardInfo = saveCard;
+                            cardName = card;
+                            androidPayCredentials = androidPay;
+                            detailSettingsCell[0].setTextAndValue(cardName, LocaleController.getString("PaymentCheckoutMethod", R.string.PaymentCheckoutMethod), true);
+                            return false;
+                        }
+
+                        @Override
+                        public void onFragmentDestroyed() {
+
+                        }
+
+                        @Override
+                        public void currentPasswordUpdated(TLRPC.TL_account_password password) {
+
+                        }
+                    });
+                    presentFragment(activity);
                 });
+            }
+
+            TLRPC.User providerUser = null;
+            for (int a = 0; a < paymentForm.users.size(); a++) {
+                TLRPC.User user = paymentForm.users.get(a);
+                if (user.id == paymentForm.provider_id) {
+                    providerUser = user;
+                }
+            }
+            final String providerName;
+            if (providerUser != null) {
+                detailSettingsCell[1] = new TextDetailSettingsCell(context);
+                detailSettingsCell[1].setBackgroundDrawable(Theme.getSelectorDrawable(true));
+                detailSettingsCell[1].setTextAndValue(providerName = ContactsController.formatName(providerUser.first_name, providerUser.last_name), LocaleController.getString("PaymentCheckoutProvider", R.string.PaymentCheckoutProvider), true);
+                linearLayout2.addView(detailSettingsCell[1]);
+            } else {
+                providerName = "";
             }
 
             if (validateRequest != null) {
                 if (validateRequest.info.shipping_address != null) {
                     String address = String.format("%s %s, %s, %s, %s, %s", validateRequest.info.shipping_address.street_line1, validateRequest.info.shipping_address.street_line2, validateRequest.info.shipping_address.city, validateRequest.info.shipping_address.state, validateRequest.info.shipping_address.country_iso2, validateRequest.info.shipping_address.post_code);
-                    detailSettingsCell[1] = new TextDetailSettingsCell(context);
-                    detailSettingsCell[1].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                    detailSettingsCell[1].setTextAndValue(address, LocaleController.getString("PaymentShippingAddress", R.string.PaymentShippingAddress), true);
-                    linearLayout2.addView(detailSettingsCell[1]);
-                }
-
-                if (validateRequest.info.name != null) {
                     detailSettingsCell[2] = new TextDetailSettingsCell(context);
                     detailSettingsCell[2].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                    detailSettingsCell[2].setTextAndValue(validateRequest.info.name, LocaleController.getString("PaymentCheckoutName", R.string.PaymentCheckoutName), true);
+                    detailSettingsCell[2].setTextAndValue(address, LocaleController.getString("PaymentShippingAddress", R.string.PaymentShippingAddress), true);
                     linearLayout2.addView(detailSettingsCell[2]);
                 }
 
-                if (validateRequest.info.phone != null) {
+                if (validateRequest.info.name != null) {
                     detailSettingsCell[3] = new TextDetailSettingsCell(context);
                     detailSettingsCell[3].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                    detailSettingsCell[3].setTextAndValue(PhoneFormat.getInstance().format(validateRequest.info.phone), LocaleController.getString("PaymentCheckoutPhoneNumber", R.string.PaymentCheckoutPhoneNumber), true);
+                    detailSettingsCell[3].setTextAndValue(validateRequest.info.name, LocaleController.getString("PaymentCheckoutName", R.string.PaymentCheckoutName), true);
                     linearLayout2.addView(detailSettingsCell[3]);
                 }
 
-                if (validateRequest.info.email != null) {
+                if (validateRequest.info.phone != null) {
                     detailSettingsCell[4] = new TextDetailSettingsCell(context);
                     detailSettingsCell[4].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                    detailSettingsCell[4].setTextAndValue(validateRequest.info.email, LocaleController.getString("PaymentCheckoutEmail", R.string.PaymentCheckoutEmail), true);
+                    detailSettingsCell[4].setTextAndValue(PhoneFormat.getInstance().format(validateRequest.info.phone), LocaleController.getString("PaymentCheckoutPhoneNumber", R.string.PaymentCheckoutPhoneNumber), true);
                     linearLayout2.addView(detailSettingsCell[4]);
                 }
 
-                if (shippingOption != null) {
+                if (validateRequest.info.email != null) {
                     detailSettingsCell[5] = new TextDetailSettingsCell(context);
                     detailSettingsCell[5].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-                    detailSettingsCell[5].setTextAndValue(shippingOption.title, LocaleController.getString("PaymentCheckoutShippingMethod", R.string.PaymentCheckoutShippingMethod), false);
+                    detailSettingsCell[5].setTextAndValue(validateRequest.info.email, LocaleController.getString("PaymentCheckoutEmail", R.string.PaymentCheckoutEmail), true);
                     linearLayout2.addView(detailSettingsCell[5]);
+                }
+
+                if (shippingOption != null) {
+                    detailSettingsCell[6] = new TextDetailSettingsCell(context);
+                    detailSettingsCell[6].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                    detailSettingsCell[6].setTextAndValue(shippingOption.title, LocaleController.getString("PaymentCheckoutShippingMethod", R.string.PaymentCheckoutShippingMethod), false);
+                    linearLayout2.addView(detailSettingsCell[6]);
                 }
             }
 
@@ -1676,25 +1745,24 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 bottomLayout = new FrameLayout(context);
                 bottomLayout.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 frameLayout.addView(bottomLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 48, Gravity.BOTTOM));
-                bottomLayout.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
-                        builder.setTitle(LocaleController.getString("PaymentTransactionReview", R.string.PaymentTransactionReview));
-                        builder.setMessage(LocaleController.formatString("PaymentTransactionMessage", R.string.PaymentTransactionMessage, totalPrice, currentBotName, currentItemName));
-                        builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface dialogInterface, int i) {
-                                showEditDoneProgress(true);
-                                setDonePressed(true);
-                                sendData();
-                            }
-                        });
-                        builder.setNegativeButton(LocaleController.getString("Cancel", R.string.Cancel), null);
-                        showDialog(builder.create());
+                bottomLayout.setOnClickListener(v -> {
+                    if (botUser != null && !botUser.verified) {
+                        String botKey = "payment_warning_" + botUser.id;
+                        SharedPreferences preferences = MessagesController.getNotificationsSettings(currentAccount);
+                        if (!preferences.getBoolean(botKey, false)) {
+                            preferences.edit().putBoolean(botKey, true).commit();
+                            AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+                            builder.setTitle(LocaleController.getString("PaymentWarning", R.string.PaymentWarning));
+                            builder.setMessage(LocaleController.formatString("PaymentWarningText", R.string.PaymentWarningText, currentBotName, providerName));
+                            builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), (dialogInterface, i) -> showPayAlert(totalPrice));
+                            showDialog(builder.create());
+                        } else {
+                            showPayAlert(totalPrice);
+                        }
+                    } else {
+                        showPayAlert(totalPrice);
                     }
                 });
-
                 payTextView = new TextView(context);
                 payTextView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText6));
                 payTextView.setText(LocaleController.formatString("PaymentCheckoutPay", R.string.PaymentCheckoutPay, totalPrice));
@@ -1703,24 +1771,351 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 payTextView.setTypeface(AndroidUtilities.getTypeface("fonts/rmedium.ttf"));
                 bottomLayout.addView(payTextView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
 
-                progressView = new ContextProgressView(context, 0);
-                progressView.setVisibility(View.INVISIBLE);
-                bottomLayout.addView(progressView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
+                progressViewButton = new ContextProgressView(context, 0);
+                progressViewButton.setVisibility(View.INVISIBLE);
+                bottomLayout.addView(progressViewButton, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
 
                 View shadow = new View(context);
                 shadow.setBackgroundResource(R.drawable.header_shadow_reverse);
                 frameLayout.addView(shadow, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 3, Gravity.LEFT | Gravity.BOTTOM, 0, 0, 0, 48));
+
+                doneItem.setEnabled(false);
+                doneItem.getImageView().setVisibility(View.INVISIBLE);
+
+                webView = new WebView(context) {
+                    @Override
+                    public boolean onTouchEvent(MotionEvent event) {
+                        getParent().requestDisallowInterceptTouchEvent(true);
+                        return super.onTouchEvent(event);
+                    }
+                };
+                webView.setBackgroundColor(0xffffffff);
+                webView.getSettings().setJavaScriptEnabled(true);
+                webView.getSettings().setDomStorageEnabled(true);
+
+                if (Build.VERSION.SDK_INT >= 21) {
+                    webView.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                    CookieManager cookieManager = CookieManager.getInstance();
+                    cookieManager.setAcceptThirdPartyCookies(webView, true);
+                }
+
+                webView.setWebViewClient(new WebViewClient() {
+
+                    @Override
+                    public void onLoadResource(WebView view, String url) {
+                        try {
+                            Uri uri = Uri.parse(url);
+                            if ("t.me".equals(uri.getHost())) {
+                                goToNextStep();
+                                return;
+                            }
+                        } catch (Exception ignore) {
+
+                        }
+                        super.onLoadResource(view, url);
+                    }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        super.onPageFinished(view, url);
+                        webviewLoading = false;
+                        showEditDoneProgress(true, false);
+                        updateSavePaymentField();
+                    }
+
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                        try {
+                            Uri uri = Uri.parse(url);
+                            if ("t.me".equals(uri.getHost())) {
+                                goToNextStep();
+                                return true;
+                            }
+                        } catch (Exception ignore) {
+
+                        }
+                        return false;
+                    }
+                });
+
+                frameLayout.addView(webView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
+                webView.setVisibility(View.GONE);
             }
 
             sectionCell[1] = new ShadowSectionCell(context);
             sectionCell[1].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
             linearLayout2.addView(sectionCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+        } else if (currentStep == 6) {
+            bottomCell[2] = new TextInfoPrivacyCell(context);
+            bottomCell[2].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider, Theme.key_windowBackgroundGrayShadow));
+            linearLayout2.addView(bottomCell[2], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+            settingsCell1 = new TextSettingsCell(context);
+            settingsCell1.setBackgroundDrawable(Theme.getSelectorDrawable(true));
+            settingsCell1.setTag(Theme.key_windowBackgroundWhiteRedText3);
+            settingsCell1.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteRedText3));
+            settingsCell1.setText(LocaleController.getString("AbortPassword", R.string.AbortPassword), false);
+            linearLayout2.addView(settingsCell1, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+            settingsCell1.setOnClickListener(v -> {
+                AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+                String text = LocaleController.getString("TurnPasswordOffQuestion", R.string.TurnPasswordOffQuestion);
+                if (currentPassword.has_secure_values) {
+                    text += "\n\n" + LocaleController.getString("TurnPasswordOffPassport", R.string.TurnPasswordOffPassport);
+                }
+                builder.setMessage(text);
+                builder.setTitle(LocaleController.getString("AppName", R.string.AppName));
+                builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), (dialogInterface, i) -> sendSavePassword(true));
+                builder.setNegativeButton(LocaleController.getString("Cancel", R.string.Cancel), null);
+                showDialog(builder.create());
+            });
+
+            inputFields = new EditTextBoldCursor[FIELDS_COUNT_PASSWORD];
+            for (int a = 0; a < FIELDS_COUNT_PASSWORD; a++) {
+                if (a == FIELD_ENTERPASSWORD) {
+                    headerCell[0] = new HeaderCell(context);
+                    headerCell[0].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                    headerCell[0].setText(LocaleController.getString("PaymentPasswordTitle", R.string.PaymentPasswordTitle));
+                    linearLayout2.addView(headerCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                } else if (a == FIELD_ENTERPASSWORDEMAIL) {
+                    headerCell[1] = new HeaderCell(context);
+                    headerCell[1].setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                    headerCell[1].setText(LocaleController.getString("PaymentPasswordEmailTitle", R.string.PaymentPasswordEmailTitle));
+                    linearLayout2.addView(headerCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                }
+
+                ViewGroup container = new FrameLayout(context);
+                linearLayout2.addView(container, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48));
+                container.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+
+                if (a == FIELD_ENTERPASSWORD) {
+                    View divider = new View(context);
+                    dividers.add(divider);
+                    divider.setBackgroundColor(Theme.getColor(Theme.key_divider));
+                    container.addView(divider, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.LEFT | Gravity.BOTTOM));
+                }
+
+                inputFields[a] = new EditTextBoldCursor(context);
+                inputFields[a].setTag(a);
+                inputFields[a].setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+                inputFields[a].setHintTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteHintText));
+                inputFields[a].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                inputFields[a].setBackgroundDrawable(null);
+                inputFields[a].setCursorColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                inputFields[a].setCursorSize(AndroidUtilities.dp(20));
+                inputFields[a].setCursorWidth(1.5f);
+
+                if (a == FIELD_ENTERPASSWORD || a == FIELD_REENTERPASSWORD) {
+                    inputFields[a].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                    inputFields[a].setTypeface(Typeface.DEFAULT);
+                    inputFields[a].setImeOptions(EditorInfo.IME_ACTION_NEXT | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+                } else {
+                    inputFields[a].setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+                }
+
+                switch (a) {
+                    case FIELD_ENTERPASSWORD:
+                        inputFields[a].setHint(LocaleController.getString("PaymentPasswordEnter", R.string.PaymentPasswordEnter));
+                        inputFields[a].requestFocus();
+                        break;
+                    case FIELD_REENTERPASSWORD:
+                        inputFields[a].setHint(LocaleController.getString("PaymentPasswordReEnter", R.string.PaymentPasswordReEnter));
+                        break;
+                    case FIELD_ENTERPASSWORDEMAIL:
+                        inputFields[a].setHint(LocaleController.getString("PaymentPasswordEmail", R.string.PaymentPasswordEmail));
+                        break;
+                }
+
+                inputFields[a].setPadding(0, 0, 0, AndroidUtilities.dp(6));
+                inputFields[a].setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
+                container.addView(inputFields[a], LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.LEFT | Gravity.TOP, 17, 12, 17, 6));
+
+                inputFields[a].setOnEditorActionListener((textView, i, keyEvent) -> {
+                    if (i == EditorInfo.IME_ACTION_DONE) {
+                        doneItem.performClick();
+                        return true;
+                    } else if (i == EditorInfo.IME_ACTION_NEXT) {
+                        int num = (Integer) textView.getTag();
+                        if (num == FIELD_ENTERPASSWORD) {
+                            inputFields[FIELD_REENTERPASSWORD].requestFocus();
+                        } else if (num == FIELD_REENTERPASSWORD) {
+                            inputFields[FIELD_ENTERPASSWORDEMAIL].requestFocus();
+                        }
+                    }
+                    return false;
+                });
+                if (a == FIELD_REENTERPASSWORD) {
+                    bottomCell[0] = new TextInfoPrivacyCell(context);
+                    bottomCell[0].setText(LocaleController.getString("PaymentPasswordInfo", R.string.PaymentPasswordInfo));
+                    bottomCell[0].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider, Theme.key_windowBackgroundGrayShadow));
+                    linearLayout2.addView(bottomCell[0], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                } else if (a == FIELD_ENTERPASSWORDEMAIL) {
+                    bottomCell[1] = new TextInfoPrivacyCell(context);
+                    bottomCell[1].setText(LocaleController.getString("PaymentPasswordEmailInfo", R.string.PaymentPasswordEmailInfo));
+                    bottomCell[1].setBackgroundDrawable(Theme.getThemedDrawable(context, R.drawable.greydivider_bottom, Theme.key_windowBackgroundGrayShadow));
+                    linearLayout2.addView(bottomCell[1], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+                }
+            }
+            updatePasswordFields();
         }
         return fragmentView;
     }
 
+    private void updatePasswordFields() {
+        if (currentStep != 6 || bottomCell[2] == null) {
+            return;
+        }
+        if (currentPassword == null) {
+            doneItem.setVisibility(View.VISIBLE);
+            showEditDoneProgress(true, true);
+            bottomCell[2].setVisibility(View.GONE);
+            settingsCell1.setVisibility(View.GONE);
+            headerCell[0].setVisibility(View.GONE);
+            headerCell[1].setVisibility(View.GONE);
+            bottomCell[0].setVisibility(View.GONE);
+            for (int a = 0; a < FIELDS_COUNT_PASSWORD; a++) {
+                ((View) inputFields[a].getParent()).setVisibility(View.GONE);
+            }
+            for (int a = 0; a < dividers.size(); a++) {
+                dividers.get(a).setVisibility(View.GONE);
+            }
+        } else {
+            showEditDoneProgress(true, false);
+            if (waitingForEmail) {
+                if (getParentActivity() != null) {
+                    AndroidUtilities.hideKeyboard(getParentActivity().getCurrentFocus());
+                }
+                doneItem.setVisibility(View.GONE);
+                bottomCell[2].setText(LocaleController.formatString("EmailPasswordConfirmText", R.string.EmailPasswordConfirmText, currentPassword.email_unconfirmed_pattern != null ? currentPassword.email_unconfirmed_pattern : ""));
+                bottomCell[2].setVisibility(View.VISIBLE);
+                settingsCell1.setVisibility(View.VISIBLE);
+                bottomCell[1].setText("");
+
+                headerCell[0].setVisibility(View.GONE);
+                headerCell[1].setVisibility(View.GONE);
+                bottomCell[0].setVisibility(View.GONE);
+                for (int a = 0; a < FIELDS_COUNT_PASSWORD; a++) {
+                    ((View) inputFields[a].getParent()).setVisibility(View.GONE);
+                }
+                for (int a = 0; a < dividers.size(); a++) {
+                    dividers.get(a).setVisibility(View.GONE);
+                }
+            } else {
+                doneItem.setVisibility(View.VISIBLE);
+                bottomCell[2].setVisibility(View.GONE);
+                settingsCell1.setVisibility(View.GONE);
+                bottomCell[1].setText(LocaleController.getString("PaymentPasswordEmailInfo", R.string.PaymentPasswordEmailInfo));
+
+                headerCell[0].setVisibility(View.VISIBLE);
+                headerCell[1].setVisibility(View.VISIBLE);
+                bottomCell[0].setVisibility(View.VISIBLE);
+                for (int a = 0; a < FIELDS_COUNT_PASSWORD; a++) {
+                    ((View) inputFields[a].getParent()).setVisibility(View.VISIBLE);
+                }
+                for (int a = 0; a < dividers.size(); a++) {
+                    dividers.get(a).setVisibility(View.VISIBLE);
+                }
+            }
+        }
+    }
+
+    private void loadPasswordInfo() {
+        if (loadingPasswordInfo) {
+            return;
+        }
+        loadingPasswordInfo = true;
+        TLRPC.TL_account_getPassword req = new TLRPC.TL_account_getPassword();
+        ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+            loadingPasswordInfo = false;
+            if (error == null) {
+                currentPassword = (TLRPC.TL_account_password) response;
+                if (!TwoStepVerificationActivity.canHandleCurrentPassword(currentPassword, false)) {
+                    AlertsCreator.showUpdateAppAlert(getParentActivity(), LocaleController.getString("UpdateAppAlert", R.string.UpdateAppAlert), true);
+                    return;
+                }
+                if (paymentForm != null && currentPassword.has_password) {
+                    paymentForm.password_missing = false;
+                    paymentForm.can_save_credentials = true;
+                    updateSavePaymentField();
+                }
+                TwoStepVerificationActivity.initPasswordNewAlgo(currentPassword);
+                if (passwordFragment != null) {
+                    passwordFragment.setCurrentPassword(currentPassword);
+                }
+                if (!currentPassword.has_password && shortPollRunnable == null) {
+                    shortPollRunnable = () -> {
+                        if (shortPollRunnable == null) {
+                            return;
+                        }
+                        loadPasswordInfo();
+                        shortPollRunnable = null;
+                    };
+                    AndroidUtilities.runOnUIThread(shortPollRunnable, 5000);
+                }
+            }
+        }), ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
+    }
+
+    private void showAlertWithText(String title, String text) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+        builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), null);
+        builder.setTitle(title);
+        builder.setMessage(text);
+        showDialog(builder.create());
+    }
+
+    private void showPayAlert(final String totalPrice) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+        builder.setTitle(LocaleController.getString("PaymentTransactionReview", R.string.PaymentTransactionReview));
+        builder.setMessage(LocaleController.formatString("PaymentTransactionMessage", R.string.PaymentTransactionMessage, totalPrice, currentBotName, currentItemName));
+        builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), (dialogInterface, i) -> {
+            setDonePressed(true);
+            sendData();
+        });
+        builder.setNegativeButton(LocaleController.getString("Cancel", R.string.Cancel), null);
+        showDialog(builder.create());
+    }
+
+    private void initAndroidPay(Context context) {
+        /*if (Build.VERSION.SDK_INT < 19) {
+            return;
+        }
+        googleApiClient = new GoogleApiClient.Builder(context)
+                .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
+                    @Override
+                    public void onConnected(Bundle bundle) {
+
+                    }
+
+                    @Override
+                    public void onConnectionSuspended(int i) {
+
+                    }
+                })
+                .addOnConnectionFailedListener(connectionResult -> {
+
+                })
+                .addApi(Wallet.API, new Wallet.WalletOptions.Builder()
+                        .setEnvironment(paymentForm.invoice.test ? WalletConstants.ENVIRONMENT_TEST : WalletConstants.ENVIRONMENT_PRODUCTION)
+                        .setTheme(WalletConstants.THEME_LIGHT)
+                        .build())
+                .build();
+
+        Wallet.Payments.isReadyToPay(googleApiClient).setResultCallback(
+                booleanResult -> {
+                    if (booleanResult.getStatus().isSuccess()) {
+                        if (booleanResult.getValue()) {
+                            showAndroidPay();
+                        }
+                    } else {
+
+                    }
+                }
+        );
+        googleApiClient.connect();*/
+    }
+
     private String getTotalPriceString(ArrayList<TLRPC.TL_labeledPrice> prices) {
-        int amount = 0;
+        long amount = 0;
         for (int a = 0; a < prices.size(); a++) {
             amount += prices.get(a).amount;
         }
@@ -1728,29 +2123,32 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     }
 
     private String getTotalPriceDecimalString(ArrayList<TLRPC.TL_labeledPrice> prices) {
-        int amount = 0;
+        long amount = 0;
         for (int a = 0; a < prices.size(); a++) {
             amount += prices.get(a).amount;
         }
-        return LocaleController.getInstance().formatCurrencyDecimalString(amount, paymentForm.invoice.currency);
+        return LocaleController.getInstance().formatCurrencyDecimalString(amount, paymentForm.invoice.currency, false);
     }
 
     @Override
     public boolean onFragmentCreate() {
-        NotificationCenter.getInstance().addObserver(this, NotificationCenter.didSetTwoStepPassword);
-        NotificationCenter.getInstance().addObserver(this, NotificationCenter.didRemovedTwoStepPassword);
+        NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.didSetTwoStepPassword);
+        NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.didRemovedTwoStepPassword);
         if (currentStep != 4) {
-            NotificationCenter.getInstance().addObserver(this, NotificationCenter.paymentFinished);
+            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.paymentFinished);
         }
         return super.onFragmentCreate();
     }
 
     @Override
     public void onFragmentDestroy() {
-        NotificationCenter.getInstance().removeObserver(this, NotificationCenter.didSetTwoStepPassword);
-        NotificationCenter.getInstance().removeObserver(this, NotificationCenter.didRemovedTwoStepPassword);
+        if (delegate != null) {
+            delegate.onFragmentDestroyed();
+        }
+        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.didSetTwoStepPassword);
+        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.didRemovedTwoStepPassword);
         if (currentStep != 4) {
-            NotificationCenter.getInstance().removeObserver(this, NotificationCenter.paymentFinished);
+            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.paymentFinished);
         }
         if (webView != null) {
             try {
@@ -1767,7 +2165,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             }
         }
         try {
-            if (currentStep == 2 && Build.VERSION.SDK_INT >= 23 && (UserConfig.passcodeHash.length() == 0 || UserConfig.allowScreenCapture)) {
+            if ((currentStep == 2 || currentStep == 6) && Build.VERSION.SDK_INT >= 23 && (SharedConfig.passcodeHash.length() == 0 || SharedConfig.allowScreenCapture)) {
                 getParentActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
             }
         } catch (Throwable e) {
@@ -1781,80 +2179,181 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     protected void onTransitionAnimationEnd(boolean isOpen, boolean backward) {
         if (isOpen && !backward) {
             if (webView != null) {
-                webView.loadUrl(paymentForm.url);
+                if (currentStep != 4) {
+                    webView.loadUrl(paymentForm.url);
+                }
             } else if (currentStep == 2) {
                 inputFields[FIELD_CARD].requestFocus();
                 AndroidUtilities.showKeyboard(inputFields[FIELD_CARD]);
             } else if (currentStep == 3) {
                 inputFields[FIELD_SAVEDPASSWORD].requestFocus();
                 AndroidUtilities.showKeyboard(inputFields[FIELD_SAVEDPASSWORD]);
+            } else if (currentStep == 6) {
+                if (!waitingForEmail) {
+                    inputFields[FIELD_ENTERPASSWORD].requestFocus();
+                    AndroidUtilities.showKeyboard(inputFields[FIELD_ENTERPASSWORD]);
+                }
             }
         }
     }
 
     @Override
-    public void didReceivedNotification(int id, Object... args) {
+    public void didReceivedNotification(int id, int account, Object... args) {
         if (id == NotificationCenter.didSetTwoStepPassword) {
             paymentForm.password_missing = false;
+            paymentForm.can_save_credentials = true;
             updateSavePaymentField();
         } else if (id == NotificationCenter.didRemovedTwoStepPassword) {
             paymentForm.password_missing = true;
+            paymentForm.can_save_credentials = false;
             updateSavePaymentField();
         } else if (id == NotificationCenter.paymentFinished) {
             removeSelfFromStack();
         }
     }
 
-    /*private void showAndroidPay(boolean show) {
-        if (show) {
-            if (getParentActivity() == null) {
-                return;
-            }
-            Activity parentActivity = getParentActivity();
-            AlertDialog.Builder builder = new AlertDialog.Builder(parentActivity);
-            FrameLayout frameLayout = new FrameLayout(parentActivity);
-            walletFragment.onCreate(null);
-            walletFragment.onCreateView(parentActivity.getLayoutInflater(), frameLayout, null);
-            walletFragment.onStart();
-            walletFragment.onResume();
-            builder.setView(frameLayout);
-            builder.setNegativeButton(LocaleController.getString("Cancel", R.string.Cancel), null);
-            showDialog(builder.create());
-        } else {
-            WalletFragmentOptions.Builder optionsBuilder = WalletFragmentOptions.newBuilder();
-            optionsBuilder.setEnvironment(WalletConstants.ENVIRONMENT_TEST);
-            optionsBuilder.setMode(WalletFragmentMode.BUY_BUTTON);
-            walletFragment = WalletFragment.newInstance(optionsBuilder.build());
-
-            ArrayList<TLRPC.TL_labeledPrice> arrayList = new ArrayList<>();
-            arrayList.addAll(paymentForm.invoice.prices);
-            if (shippingOption != null) {
-                arrayList.addAll(shippingOption.prices);
-            }
-            final String totalPrice = getTotalPriceDecimalString(arrayList);
-
-            MaskedWalletRequest maskedWalletRequest = MaskedWalletRequest.newBuilder()
-                    .setPaymentMethodTokenizationParameters(PaymentMethodTokenizationParameters.newBuilder()
-                            .setPaymentMethodTokenizationType(PaymentMethodTokenizationType.PAYMENT_GATEWAY)
-                            .addParameter("gateway", "stripe")
-                            .addParameter("stripe:publishableKey", stripeApiKey)
-                            .addParameter("stripe:version", StripeApiHandler.VERSION)
-                            .build())
-
-                    //.setShippingAddressRequired(true)
-                    .setEstimatedTotalPrice(totalPrice)
-                    .setCurrencyCode(paymentForm.invoice.currency)
-                    .build();
-
-            WalletFragmentInitParams initParams = WalletFragmentInitParams.newBuilder()
-                    .setMaskedWalletRequest(maskedWalletRequest)
-                    .setMaskedWalletRequestCode(91)
-                    .build();
-
-            walletFragment.initialize(initParams);
-            settingsCell1.setVisibility(View.VISIBLE);
+    private void showAndroidPay() {
+        if (getParentActivity() == null || androidPayContainer == null) {
+            return;
         }
-    }*/
+
+        WalletFragmentOptions.Builder optionsBuilder = WalletFragmentOptions.newBuilder();
+        optionsBuilder.setEnvironment(paymentForm.invoice.test ? WalletConstants.ENVIRONMENT_TEST : WalletConstants.ENVIRONMENT_PRODUCTION);
+        optionsBuilder.setMode(WalletFragmentMode.BUY_BUTTON);
+
+        WalletFragmentStyle walletFragmentStyle;
+        if (androidPayPublicKey != null) {
+            androidPayContainer.setBackgroundColor(androidPayBackgroundColor);
+            walletFragmentStyle = new WalletFragmentStyle()
+                .setBuyButtonText(WalletFragmentStyle.BuyButtonText.BUY_WITH)
+                .setBuyButtonAppearance(androidPayBlackTheme ? WalletFragmentStyle.BuyButtonAppearance.ANDROID_PAY_LIGHT_WITH_BORDER : WalletFragmentStyle.BuyButtonAppearance.ANDROID_PAY_DARK)
+                .setBuyButtonWidth(WalletFragmentStyle.Dimension.MATCH_PARENT);
+        } else {
+            walletFragmentStyle = new WalletFragmentStyle()
+                    .setBuyButtonText(WalletFragmentStyle.BuyButtonText.LOGO_ONLY)
+                    .setBuyButtonAppearance(WalletFragmentStyle.BuyButtonAppearance.ANDROID_PAY_LIGHT_WITH_BORDER)
+                    .setBuyButtonWidth(WalletFragmentStyle.Dimension.WRAP_CONTENT);
+        }
+
+        optionsBuilder.setFragmentStyle(walletFragmentStyle);
+        WalletFragment walletFragment = WalletFragment.newInstance(optionsBuilder.build());
+        FragmentManager fragmentManager = getParentActivity().getFragmentManager();
+        FragmentTransaction fragmentTransaction = fragmentManager.beginTransaction();
+        fragmentTransaction.replace(fragment_container_id, walletFragment);
+        fragmentTransaction.commit();
+
+        ArrayList<TLRPC.TL_labeledPrice> arrayList = new ArrayList<>(paymentForm.invoice.prices);
+        if (shippingOption != null) {
+            arrayList.addAll(shippingOption.prices);
+        }
+        totalPriceDecimal = getTotalPriceDecimalString(arrayList);
+
+        PaymentMethodTokenizationParameters parameters;
+        if (androidPayPublicKey != null) {
+            parameters = PaymentMethodTokenizationParameters.newBuilder()
+                    .setPaymentMethodTokenizationType(PaymentMethodTokenizationType.NETWORK_TOKEN)
+                    .addParameter("publicKey", androidPayPublicKey)
+                    .build();
+        } else {
+            parameters = PaymentMethodTokenizationParameters.newBuilder()
+                    .setPaymentMethodTokenizationType(PaymentMethodTokenizationType.PAYMENT_GATEWAY)
+                    .addParameter("gateway", "stripe")
+                    .addParameter("stripe:publishableKey", stripeApiKey)
+                    .addParameter("stripe:version", StripeApiHandler.VERSION)
+                    .build();
+        }
+
+        MaskedWalletRequest maskedWalletRequest = MaskedWalletRequest.newBuilder()
+                .setPaymentMethodTokenizationParameters(parameters)
+                .setEstimatedTotalPrice(totalPriceDecimal)
+                .setCurrencyCode(paymentForm.invoice.currency)
+                .build();
+
+        WalletFragmentInitParams initParams = WalletFragmentInitParams.newBuilder()
+                .setMaskedWalletRequest(maskedWalletRequest)
+                .setMaskedWalletRequestCode(LOAD_MASKED_WALLET_REQUEST_CODE)
+                .build();
+
+        walletFragment.initialize(initParams);
+        androidPayContainer.setVisibility(View.VISIBLE);
+        AnimatorSet animatorSet = new AnimatorSet();
+        animatorSet.playTogether(ObjectAnimator.ofFloat(androidPayContainer, "alpha", 0.0f, 1.0f));
+        animatorSet.setInterpolator(new DecelerateInterpolator());
+        animatorSet.setDuration(180);
+        animatorSet.start();
+    }
+
+    @Override
+    public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (requestCode == LOAD_MASKED_WALLET_REQUEST_CODE) {
+            if (resultCode == Activity.RESULT_OK) {
+                showEditDoneProgress(true, true);
+                setDonePressed(true);
+
+                MaskedWallet maskedWallet = data.getParcelableExtra(WalletConstants.EXTRA_MASKED_WALLET);
+
+                Cart.Builder cardBuilder = Cart.newBuilder()
+                        .setCurrencyCode(paymentForm.invoice.currency)
+                        .setTotalPrice(totalPriceDecimal);
+
+                ArrayList<TLRPC.TL_labeledPrice> arrayList = new ArrayList<>(paymentForm.invoice.prices);
+                if (shippingOption != null) {
+                    arrayList.addAll(shippingOption.prices);
+                }
+                for (int a = 0; a < arrayList.size(); a++) {
+                    TLRPC.TL_labeledPrice price = arrayList.get(a);
+                    String amount = LocaleController.getInstance().formatCurrencyDecimalString(price.amount, paymentForm.invoice.currency, false);
+                    cardBuilder.addLineItem(LineItem.newBuilder()
+                            .setCurrencyCode(paymentForm.invoice.currency)
+                            .setQuantity("1")
+                            .setDescription(price.label)
+                            .setTotalPrice(amount)
+                            .setUnitPrice(amount).build());
+                }
+                FullWalletRequest fullWalletRequest = FullWalletRequest.newBuilder()
+                        .setCart(cardBuilder.build())
+                        .setGoogleTransactionId(maskedWallet.getGoogleTransactionId())
+                        .build();
+                Wallet.Payments.loadFullWallet(googleApiClient, fullWalletRequest, LOAD_FULL_WALLET_REQUEST_CODE);
+            } else {
+                showEditDoneProgress(true, false);
+                setDonePressed(false);
+            }
+        } else if (requestCode == LOAD_FULL_WALLET_REQUEST_CODE) {
+            if (resultCode == Activity.RESULT_OK) {
+                FullWallet fullWallet = data.getParcelableExtra(WalletConstants.EXTRA_FULL_WALLET);
+                String tokenJSON = fullWallet.getPaymentMethodToken().getToken();
+                try {
+                    if (androidPayPublicKey != null) {
+                        androidPayCredentials = new TLRPC.TL_inputPaymentCredentialsAndroidPay();
+                        androidPayCredentials.payment_token = new TLRPC.TL_dataJSON();
+                        androidPayCredentials.payment_token.data = tokenJSON;
+                        androidPayCredentials.google_transaction_id = fullWallet.getGoogleTransactionId();
+                        String[] descriptions = fullWallet.getPaymentDescriptions();
+                        if (descriptions.length > 0) {
+                            cardName = descriptions[0];
+                        } else {
+                            cardName = "Android Pay";
+                        }
+                    } else {
+                        Token token = TokenParser.parseToken(tokenJSON);
+                        paymentJson = String.format(Locale.US, "{\"type\":\"%1$s\", \"id\":\"%2$s\"}", token.getType(), token.getId());
+                        Card card = token.getCard();
+                        cardName = card.getType() + " *" + card.getLast4();
+                    }
+                    goToNextStep();
+                    showEditDoneProgress(true, false);
+                    setDonePressed(false);
+                } catch (JSONException ignore) {
+                    showEditDoneProgress(true, false);
+                    setDonePressed(false);
+                }
+            } else {
+                showEditDoneProgress(true, false);
+                setDonePressed(false);
+            }
+        }
+    }
 
     private void goToNextStep() {
         if (currentStep == 0) {
@@ -1862,13 +2361,13 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             if (paymentForm.invoice.flexible) {
                 nextStep = 1;
             } else if (paymentForm.saved_credentials != null) {
-                if (UserConfig.tmpPassword != null) {
-                    if (UserConfig.tmpPassword.valid_until < ConnectionsManager.getInstance().getCurrentTime() + 60) {
-                        UserConfig.tmpPassword = null;
-                        UserConfig.saveConfig(false);
+                if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
+                    if (UserConfig.getInstance(currentAccount).tmpPassword.valid_until < ConnectionsManager.getInstance(currentAccount).getCurrentTime() + 60) {
+                        UserConfig.getInstance(currentAccount).tmpPassword = null;
+                        UserConfig.getInstance(currentAccount).saveConfig(false);
                     }
                 }
-                if (UserConfig.tmpPassword != null) {
+                if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
                     nextStep = 4;
                 } else {
                     nextStep = 3;
@@ -1876,17 +2375,17 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             } else {
                 nextStep = 2;
             }
-            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, null, null, cardName, validateRequest, saveCardInfo));
+            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, null, null, cardName, validateRequest, saveCardInfo, androidPayCredentials), isWebView);
         } else if (currentStep == 1) {
             int nextStep;
             if (paymentForm.saved_credentials != null) {
-                if (UserConfig.tmpPassword != null) {
-                    if (UserConfig.tmpPassword.valid_until < ConnectionsManager.getInstance().getCurrentTime() + 60) {
-                        UserConfig.tmpPassword = null;
-                        UserConfig.saveConfig(false);
+                if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
+                    if (UserConfig.getInstance(currentAccount).tmpPassword.valid_until < ConnectionsManager.getInstance(currentAccount).getCurrentTime() + 60) {
+                        UserConfig.getInstance(currentAccount).tmpPassword = null;
+                        UserConfig.getInstance(currentAccount).saveConfig(false);
                     }
                 }
-                if (UserConfig.tmpPassword != null) {
+                if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
                     nextStep = 4;
                 } else {
                     nextStep = 3;
@@ -1894,13 +2393,41 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             } else {
                 nextStep = 2;
             }
-            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, shippingOption, null, cardName, validateRequest, saveCardInfo));
+            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, shippingOption, null, cardName, validateRequest, saveCardInfo, androidPayCredentials), isWebView);
         } else if (currentStep == 2) {
-            if (delegate != null) {
-                delegate.didSelectNewCard(paymentJson, cardName, saveCardInfo);
-                finishFragment();
+            if (paymentForm.password_missing && saveCardInfo) {
+                passwordFragment = new PaymentFormActivity(paymentForm, messageObject, 6, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo, androidPayCredentials);
+                passwordFragment.setCurrentPassword(currentPassword);
+                passwordFragment.setDelegate(new PaymentFormActivityDelegate() {
+                    @Override
+                    public boolean didSelectNewCard(String tokenJson, String card, boolean saveCard, TLRPC.TL_inputPaymentCredentialsAndroidPay androidPay) {
+                        if (delegate != null) {
+                            delegate.didSelectNewCard(tokenJson, card, saveCard, androidPay);
+                        }
+                        if (isWebView) {
+                            removeSelfFromStack();
+                        }
+                        return delegate != null;
+                    }
+
+                    @Override
+                    public void onFragmentDestroyed() {
+                        passwordFragment = null;
+                    }
+
+                    @Override
+                    public void currentPasswordUpdated(TLRPC.TL_account_password password) {
+                        currentPassword = password;
+                    }
+                });
+                presentFragment(passwordFragment, isWebView);
             } else {
-                presentFragment(new PaymentFormActivity(paymentForm, messageObject, 4, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo));
+                if (delegate != null) {
+                    delegate.didSelectNewCard(paymentJson, cardName, saveCardInfo, androidPayCredentials);
+                    finishFragment();
+                } else {
+                    presentFragment(new PaymentFormActivity(paymentForm, messageObject, 4, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo, androidPayCredentials), isWebView);
+                }
             }
         } else if (currentStep == 3) {
             int nextStep;
@@ -1909,20 +2436,27 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             } else {
                 nextStep = 2;
             }
-            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo), !passwordOk);
+            presentFragment(new PaymentFormActivity(paymentForm, messageObject, nextStep, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo, androidPayCredentials), !passwordOk);
         } else if (currentStep == 4) {
-            NotificationCenter.getInstance().postNotificationName(NotificationCenter.paymentFinished);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.paymentFinished);
             finishFragment();
+        } else if (currentStep == 6) {
+            if (!delegate.didSelectNewCard(paymentJson, cardName, saveCardInfo, androidPayCredentials)) {
+                presentFragment(new PaymentFormActivity(paymentForm, messageObject, 4, requestedInfo, shippingOption, paymentJson, cardName, validateRequest, saveCardInfo, androidPayCredentials), true);
+            } else {
+                finishFragment();
+            }
         }
     }
 
     private void updateSavePaymentField() {
-        if (bottomCell[0] == null) {
+        if (bottomCell[0] == null || sectionCell[2] == null) {
             return;
         }
-        if (paymentForm.can_save_credentials && (webView == null || webView != null && !webviewLoading)) {
+        if ((paymentForm.password_missing || paymentForm.can_save_credentials) && (webView == null || webView != null && !webviewLoading)) {
             SpannableStringBuilder text = new SpannableStringBuilder(LocaleController.getString("PaymentCardSavePaymentInformationInfoLine1", R.string.PaymentCardSavePaymentInformationInfoLine1));
             if (paymentForm.password_missing) {
+                loadPasswordInfo();
                 text.append("\n");
                 int len = text.length();
                 String str2 = LocaleController.getString("PaymentCardSavePaymentInformationInfoLine2", R.string.PaymentCardSavePaymentInformationInfoLine2);
@@ -1932,15 +2466,13 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 if (index1 != -1 && index2 != -1) {
                     index1 += len;
                     index2 += len;
-                    bottomCell[0].getTextView().setMovementMethod(new LinkMovementMethodMy());
+                    bottomCell[0].getTextView().setMovementMethod(new AndroidUtilities.LinkMovementMethodMy());
                     text.replace(index2, index2 + 1, "");
                     text.replace(index1, index1 + 1, "");
                     text.setSpan(new LinkSpan(), index1, index2 - 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                 }
-                checkCell1.setEnabled(false);
-            } else {
-                checkCell1.setEnabled(true);
             }
+            checkCell1.setEnabled(true);
             bottomCell[0].setText(text);
             checkCell1.setVisibility(View.VISIBLE);
             bottomCell[0].setVisibility(View.VISIBLE);
@@ -1998,20 +2530,141 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         }
     }
 
-    private boolean sendCardData() {
-        if (paymentForm.saved_credentials != null && !saveCardInfo && paymentForm.can_save_credentials) {
-            TLRPC.TL_payments_clearSavedInfo req = new TLRPC.TL_payments_clearSavedInfo();
-            req.credentials = true;
-            paymentForm.saved_credentials = null;
-            UserConfig.tmpPassword = null;
-            UserConfig.saveConfig(false);
-            ConnectionsManager.getInstance().sendRequest(req, new RequestDelegate() {
-                @Override
-                public void run(TLObject response, TLRPC.TL_error error) {
+    private void sendSavePassword(final boolean clear) {
+        final TLRPC.TL_account_updatePasswordSettings req = new TLRPC.TL_account_updatePasswordSettings();
+        final String email;
+        final String firstPassword;
+        if (clear) {
+            doneItem.setVisibility(View.VISIBLE);
+            email = null;
+            firstPassword = null;
+            req.new_settings = new TLRPC.TL_account_passwordInputSettings();
+            req.new_settings.flags = 2;
+            req.new_settings.email = "";
+            req.password = new TLRPC.TL_inputCheckPasswordEmpty();
+        } else {
+            firstPassword = inputFields[FIELD_ENTERPASSWORD].getText().toString();
+            if (TextUtils.isEmpty(firstPassword)) {
+                shakeField(FIELD_ENTERPASSWORD);
+                return;
+            }
+            String secondPassword = inputFields[FIELD_REENTERPASSWORD].getText().toString();
+            if (!firstPassword.equals(secondPassword)) {
+                try {
+                    Toast.makeText(getParentActivity(), LocaleController.getString("PasswordDoNotMatch", R.string.PasswordDoNotMatch), Toast.LENGTH_SHORT).show();
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+                shakeField(FIELD_REENTERPASSWORD);
+                return;
+            }
+            email = inputFields[FIELD_ENTERPASSWORDEMAIL].getText().toString();
+            if (email.length() < 3) {
+                shakeField(FIELD_ENTERPASSWORDEMAIL);
+                return;
+            }
+            int dot = email.lastIndexOf('.');
+            int dog = email.lastIndexOf('@');
+            if (dot < 0 || dog < 0 || dot < dog) {
+                shakeField(FIELD_ENTERPASSWORDEMAIL);
+                return;
+            }
 
+            req.password = new TLRPC.TL_inputCheckPasswordEmpty();
+            req.new_settings = new TLRPC.TL_account_passwordInputSettings();
+            req.new_settings.flags |= 1;
+            req.new_settings.hint = "";
+            req.new_settings.new_algo = currentPassword.new_algo;
+
+            if (email.length() > 0) {
+                req.new_settings.flags |= 2;
+                req.new_settings.email = email.trim();
+            }
+        }
+        showEditDoneProgress(true, true);
+        Utilities.globalQueue.postRunnable(() -> {
+            RequestDelegate requestDelegate = (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+                if (error != null && "SRP_ID_INVALID".equals(error.text)) {
+                    TLRPC.TL_account_getPassword getPasswordReq = new TLRPC.TL_account_getPassword();
+                    ConnectionsManager.getInstance(currentAccount).sendRequest(getPasswordReq, (response2, error2) -> AndroidUtilities.runOnUIThread(() -> {
+                        if (error2 == null) {
+                            currentPassword = (TLRPC.TL_account_password) response2;
+                            TwoStepVerificationActivity.initPasswordNewAlgo(currentPassword);
+                            sendSavePassword(clear);
+                        }
+                    }), ConnectionsManager.RequestFlagWithoutLogin);
+                    return;
+                }
+                showEditDoneProgress(true, false);
+                if (clear) {
+                    currentPassword.has_password = false;
+                    currentPassword.current_algo = null;
+                    delegate.currentPasswordUpdated(currentPassword);
+                    finishFragment();
+                } else {
+                    if (error == null && response instanceof TLRPC.TL_boolTrue) {
+                        if (getParentActivity() == null) {
+                            return;
+                        }
+                        goToNextStep();
+                    } else if (error != null) {
+                        if (error.text.equals("EMAIL_UNCONFIRMED")) {
+                            AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
+                            builder.setPositiveButton(LocaleController.getString("OK", R.string.OK), (dialogInterface, i) -> {
+                                waitingForEmail = true;
+                                currentPassword.email_unconfirmed_pattern = email;
+                                updatePasswordFields();
+                            });
+                            builder.setMessage(LocaleController.getString("YourEmailAlmostThereText", R.string.YourEmailAlmostThereText));
+                            builder.setTitle(LocaleController.getString("YourEmailAlmostThere", R.string.YourEmailAlmostThere));
+                            Dialog dialog = showDialog(builder.create());
+                            if (dialog != null) {
+                                dialog.setCanceledOnTouchOutside(false);
+                                dialog.setCancelable(false);
+                            }
+                        } else {
+                            if (error.text.equals("EMAIL_INVALID")) {
+                                showAlertWithText(LocaleController.getString("AppName", R.string.AppName), LocaleController.getString("PasswordEmailInvalid", R.string.PasswordEmailInvalid));
+                            } else if (error.text.startsWith("FLOOD_WAIT")) {
+                                int time = Utilities.parseInt(error.text);
+                                String timeString;
+                                if (time < 60) {
+                                    timeString = LocaleController.formatPluralString("Seconds", time);
+                                } else {
+                                    timeString = LocaleController.formatPluralString("Minutes", time / 60);
+                                }
+                                showAlertWithText(LocaleController.getString("AppName", R.string.AppName), LocaleController.formatString("FloodWaitTime", R.string.FloodWaitTime, timeString));
+                            } else {
+                                showAlertWithText(LocaleController.getString("AppName", R.string.AppName), error.text);
+                            }
+                        }
+                    }
                 }
             });
-        }
+
+            if (!clear) {
+                byte[] newPasswordBytes = AndroidUtilities.getStringBytes(firstPassword);
+                if (currentPassword.new_algo instanceof TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) {
+                    TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow algo = (TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) currentPassword.new_algo;
+                    req.new_settings.new_password_hash = SRPHelper.getVBytes(newPasswordBytes, algo);
+                    if (req.new_settings.new_password_hash == null) {
+                        TLRPC.TL_error error = new TLRPC.TL_error();
+                        error.text = "ALGO_INVALID";
+                        requestDelegate.run(null, error);
+                    }
+                    ConnectionsManager.getInstance(currentAccount).sendRequest(req, requestDelegate, ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
+                } else {
+                    TLRPC.TL_error error = new TLRPC.TL_error();
+                    error.text = "PASSWORD_HASH_INVALID";
+                    requestDelegate.run(null, error);
+                }
+            } else {
+                ConnectionsManager.getInstance(currentAccount).sendRequest(req, requestDelegate, ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
+            }
+        });
+    }
+
+    private boolean sendCardData() {
         Integer month;
         Integer year;
         String date = inputFields[FIELD_EXPIRE_DATE].getText().toString();
@@ -2053,7 +2706,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             shakeField(FIELD_CARD_POSTCODE);
             return false;
         }
-        showEditDoneProgress(true);
+        showEditDoneProgress(true, true);
         try {
             Stripe stripe = new Stripe(stripeApiKey);
             stripe.createToken(card, new TokenCallback() {
@@ -2062,13 +2715,10 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                                 return;
                             }
                             paymentJson = String.format(Locale.US, "{\"type\":\"%1$s\", \"id\":\"%2$s\"}", token.getType(), token.getId());
-                            AndroidUtilities.runOnUIThread(new Runnable() {
-                                @Override
-                                public void run() {
-                                    goToNextStep();
-                                    showEditDoneProgress(false);
-                                    setDonePressed(false);
-                                }
+                            AndroidUtilities.runOnUIThread(() -> {
+                                goToNextStep();
+                                showEditDoneProgress(true, false);
+                                setDonePressed(false);
                             });
                         }
 
@@ -2076,7 +2726,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                             if (canceled) {
                                 return;
                             }
-                            showEditDoneProgress(false);
+                            showEditDoneProgress(true, false);
                             setDonePressed(false);
                             if (error instanceof APIConnectionException || error instanceof APIException) {
                                 AlertsCreator.showSimpleToast(PaymentFormActivity.this, LocaleController.getString("PaymentConnectionFailed", R.string.PaymentConnectionFailed));
@@ -2096,7 +2746,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         if (canceled) {
             return;
         }
-        showEditDoneProgress(true);
+        showEditDoneProgress(true, true);
         validateRequest = new TLRPC.TL_payments_validateRequestedInfo();
         validateRequest.save = saveShippingInfo;
         validateRequest.msg_id = messageObject.getId();
@@ -2110,7 +2760,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             validateRequest.info.flags |= 2;
         }
         if (paymentForm.invoice.email_requested) {
-            validateRequest.info.email = inputFields[FIELD_EMAIL].getText().toString();
+            validateRequest.info.email = inputFields[FIELD_EMAIL].getText().toString().trim();
             validateRequest.info.flags |= 4;
         }
         if (paymentForm.invoice.shipping_address_requested) {
@@ -2124,72 +2774,60 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             validateRequest.info.flags |= 8;
         }
         final TLObject req = validateRequest;
-        ConnectionsManager.getInstance().sendRequest(validateRequest, new RequestDelegate() {
-            @Override
-            public void run(final TLObject response, final TLRPC.TL_error error) {
-                if (response instanceof TLRPC.TL_payments_validatedRequestedInfo) {
-                    AndroidUtilities.runOnUIThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            requestedInfo = (TLRPC.TL_payments_validatedRequestedInfo) response;
-                            if (paymentForm.saved_info != null && !saveShippingInfo) {
-                                TLRPC.TL_payments_clearSavedInfo req = new TLRPC.TL_payments_clearSavedInfo();
-                                req.info = true;
-                                ConnectionsManager.getInstance().sendRequest(req, new RequestDelegate() {
-                                    @Override
-                                    public void run(TLObject response, TLRPC.TL_error error) {
+        ConnectionsManager.getInstance(currentAccount).sendRequest(validateRequest, (response, error) -> {
+            if (response instanceof TLRPC.TL_payments_validatedRequestedInfo) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    requestedInfo = (TLRPC.TL_payments_validatedRequestedInfo) response;
+                    if (paymentForm.saved_info != null && !saveShippingInfo) {
+                        TLRPC.TL_payments_clearSavedInfo req1 = new TLRPC.TL_payments_clearSavedInfo();
+                        req1.info = true;
+                        ConnectionsManager.getInstance(currentAccount).sendRequest(req1, (response1, error1) -> {
 
-                                    }
-                                });
-                            }
-                            goToNextStep();
-                            setDonePressed(false);
-                            showEditDoneProgress(false);
+                        });
+                    }
+                    goToNextStep();
+                    setDonePressed(false);
+                    showEditDoneProgress(true, false);
+                });
+            } else {
+                AndroidUtilities.runOnUIThread(() -> {
+                    setDonePressed(false);
+                    showEditDoneProgress(true, false);
+                    if (error != null) {
+                        switch (error.text) {
+                            case "REQ_INFO_NAME_INVALID":
+                                shakeField(FIELD_NAME);
+                                break;
+                            case "REQ_INFO_PHONE_INVALID":
+                                shakeField(FIELD_PHONE);
+                                break;
+                            case "REQ_INFO_EMAIL_INVALID":
+                                shakeField(FIELD_EMAIL);
+                                break;
+                            case "ADDRESS_COUNTRY_INVALID":
+                                shakeField(FIELD_COUNTRY);
+                                break;
+                            case "ADDRESS_CITY_INVALID":
+                                shakeField(FIELD_CITY);
+                                break;
+                            case "ADDRESS_POSTCODE_INVALID":
+                                shakeField(FIELD_POSTCODE);
+                                break;
+                            case "ADDRESS_STATE_INVALID":
+                                shakeField(FIELD_STATE);
+                                break;
+                            case "ADDRESS_STREET_LINE1_INVALID":
+                                shakeField(FIELD_STREET1);
+                                break;
+                            case "ADDRESS_STREET_LINE2_INVALID":
+                                shakeField(FIELD_STREET2);
+                                break;
+                            default:
+                                AlertsCreator.processError(currentAccount, error, PaymentFormActivity.this, req);
+                                break;
                         }
-                    });
-                } else {
-                    AndroidUtilities.runOnUIThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            setDonePressed(false);
-                            showEditDoneProgress(false);
-                            if (error != null) {
-                                switch (error.text) {
-                                    case "REQ_INFO_NAME_INVALID":
-                                        shakeField(FIELD_NAME);
-                                        break;
-                                    case "REQ_INFO_PHONE_INVALID":
-                                        shakeField(FIELD_PHONE);
-                                        break;
-                                    case "REQ_INFO_EMAIL_INVALID":
-                                        shakeField(FIELD_EMAIL);
-                                        break;
-                                    case "ADDRESS_COUNTRY_INVALID":
-                                        shakeField(FIELD_COUNTRY);
-                                        break;
-                                    case "ADDRESS_CITY_INVALID":
-                                        shakeField(FIELD_CITY);
-                                        break;
-                                    case "ADDRESS_POSTCODE_INVALID":
-                                        shakeField(FIELD_POSTCODE);
-                                        break;
-                                    case "ADDRESS_STATE_INVALID":
-                                        shakeField(FIELD_STATE);
-                                        break;
-                                    case "ADDRESS_STREET_LINE1_INVALID":
-                                        shakeField(FIELD_STREET1);
-                                        break;
-                                    case "ADDRESS_STREET_LINE2_INVALID":
-                                        shakeField(FIELD_STREET2);
-                                        break;
-                                    default:
-                                        AlertsCreator.processError(error, PaymentFormActivity.this, req);
-                                        break;
-                                }
-                            }
-                        }
-                    });
-                }
+                    }
+                });
             }
         }, ConnectionsManager.RequestFlagFailOnServerErrors);
     }
@@ -2205,7 +2843,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             info.flags |= 2;
         }
         if (paymentForm.invoice.email_requested) {
-            info.email = inputFields[FIELD_EMAIL].getText().toString();
+            info.email = inputFields[FIELD_EMAIL].getText().toString().trim();
             info.flags |= 4;
         }
         if (paymentForm.invoice.shipping_address_requested) {
@@ -2225,13 +2863,15 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         if (canceled) {
             return;
         }
-        showEditDoneProgress(true);
+        showEditDoneProgress(false, true);
         final TLRPC.TL_payments_sendPaymentForm req = new TLRPC.TL_payments_sendPaymentForm();
         req.msg_id = messageObject.getId();
-        if (UserConfig.tmpPassword != null && paymentForm.saved_credentials != null) {
+        if (UserConfig.getInstance(currentAccount).tmpPassword != null && paymentForm.saved_credentials != null) {
             req.credentials = new TLRPC.TL_inputPaymentCredentialsSaved();
             req.credentials.id = paymentForm.saved_credentials.id;
-            req.credentials.tmp_password = UserConfig.tmpPassword.tmp_password;
+            req.credentials.tmp_password = UserConfig.getInstance(currentAccount).tmpPassword.tmp_password;
+        } else if (androidPayCredentials != null) {
+            req.credentials = androidPayCredentials;
         } else {
             req.credentials = new TLRPC.TL_inputPaymentCredentials();
             req.credentials.save = saveCardInfo;
@@ -2246,37 +2886,30 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             req.shipping_option_id = shippingOption.id;
             req.flags |= 2;
         }
-        ConnectionsManager.getInstance().sendRequest(req, new RequestDelegate() {
-            @Override
-            public void run(final TLObject response, final TLRPC.TL_error error) {
-                if (response != null) {
-                    if (response instanceof TLRPC.TL_payments_paymentResult) {
-                        MessagesController.getInstance().processUpdates(((TLRPC.TL_payments_paymentResult) response).updates, false);
-                        AndroidUtilities.runOnUIThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                goToNextStep();
-                            }
-                        });
-                    } else if (response instanceof TLRPC.TL_payments_paymentVerficationNeeded) {
-                        AndroidUtilities.runOnUIThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                Browser.openUrl(getParentActivity(), ((TLRPC.TL_payments_paymentVerficationNeeded) response).url, false);
-                                goToNextStep();
-                            }
-                        });
-                    }
-                } else {
-                    AndroidUtilities.runOnUIThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            AlertsCreator.processError(error, PaymentFormActivity.this, req);
-                            setDonePressed(false);
-                            showEditDoneProgress(false);
-                        }
+        ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> {
+            if (response != null) {
+                if (response instanceof TLRPC.TL_payments_paymentResult) {
+                    MessagesController.getInstance(currentAccount).processUpdates(((TLRPC.TL_payments_paymentResult) response).updates, false);
+                    AndroidUtilities.runOnUIThread(this::goToNextStep);
+                } else if (response instanceof TLRPC.TL_payments_paymentVerficationNeeded) {
+                    AndroidUtilities.runOnUIThread(() -> {
+                        NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.paymentFinished);
+                        setDonePressed(false);
+                        webView.setVisibility(View.VISIBLE);
+                        webviewLoading = true;
+                        showEditDoneProgress(true, true);
+                        progressView.setVisibility(View.VISIBLE);
+                        doneItem.setEnabled(false);
+                        doneItem.getImageView().setVisibility(View.INVISIBLE);
+                        webView.loadUrl(((TLRPC.TL_payments_paymentVerficationNeeded) response).url);
                     });
                 }
+            } else {
+                AndroidUtilities.runOnUIThread(() -> {
+                    AlertsCreator.processError(currentAccount, error, PaymentFormActivity.this, req);
+                    setDonePressed(false);
+                    showEditDoneProgress(false, false);
+                });
             }
         }, ConnectionsManager.RequestFlagFailOnServerErrors);
     }
@@ -2299,13 +2932,13 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
     }
 
     private void checkPassword() {
-        if (UserConfig.tmpPassword != null) {
-            if (UserConfig.tmpPassword.valid_until < ConnectionsManager.getInstance().getCurrentTime() + 60) {
-                UserConfig.tmpPassword = null;
-                UserConfig.saveConfig(false);
+        if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
+            if (UserConfig.getInstance(currentAccount).tmpPassword.valid_until < ConnectionsManager.getInstance(currentAccount).getCurrentTime() + 60) {
+                UserConfig.getInstance(currentAccount).tmpPassword = null;
+                UserConfig.getInstance(currentAccount).saveConfig(false);
             }
         }
-        if (UserConfig.tmpPassword != null) {
+        if (UserConfig.getInstance(currentAccount).tmpPassword != null) {
             sendData();
             return;
         }
@@ -2318,83 +2951,86 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
             return;
         }
         final String password = inputFields[FIELD_SAVEDPASSWORD].getText().toString();
-        showEditDoneProgress(true);
+        showEditDoneProgress(true, true);
         setDonePressed(true);
         final TLRPC.TL_account_getPassword req = new TLRPC.TL_account_getPassword();
-        ConnectionsManager.getInstance().sendRequest(req, new RequestDelegate() {
-            @Override
-            public void run(final TLObject response, final TLRPC.TL_error error) {
-                AndroidUtilities.runOnUIThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (error == null) {
-                            if (response instanceof TLRPC.TL_account_noPassword) {
-                                passwordOk = false;
+        ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
+            if (error == null) {
+                TLRPC.TL_account_password currentPassword = (TLRPC.TL_account_password) response;
+                if (!TwoStepVerificationActivity.canHandleCurrentPassword(currentPassword, false)) {
+                    AlertsCreator.showUpdateAppAlert(getParentActivity(), LocaleController.getString("UpdateAppAlert", R.string.UpdateAppAlert), true);
+                    return;
+                }
+                if (!currentPassword.has_password) {
+                    passwordOk = false;
+                    goToNextStep();
+                } else {
+                    byte[] passwordBytes = AndroidUtilities.getStringBytes(password);
+
+                    Utilities.globalQueue.postRunnable(() -> {
+                        final byte x_bytes[];
+                        if (currentPassword.current_algo instanceof TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) {
+                            TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow algo = (TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) currentPassword.current_algo;
+                            x_bytes = SRPHelper.getX(passwordBytes, algo);
+                        } else {
+                            x_bytes = null;
+                        }
+
+                        final TLRPC.TL_account_getTmpPassword req1 = new TLRPC.TL_account_getTmpPassword();
+                        req1.period = 60 * 30;
+
+                        RequestDelegate requestDelegate = (response1, error1) -> AndroidUtilities.runOnUIThread(() -> {
+                            showEditDoneProgress(true, false);
+                            setDonePressed(false);
+                            if (response1 != null) {
+                                passwordOk = true;
+                                UserConfig.getInstance(currentAccount).tmpPassword = (TLRPC.TL_account_tmpPassword) response1;
+                                UserConfig.getInstance(currentAccount).saveConfig(false);
                                 goToNextStep();
                             } else {
-                                TLRPC.TL_account_password currentPassword = (TLRPC.TL_account_password) response;
-                                byte[] passwordBytes = null;
-                                try {
-                                    passwordBytes = password.getBytes("UTF-8");
-                                } catch (Exception e) {
-                                    FileLog.e(e);
-                                }
-
-                                byte[] hash = new byte[currentPassword.current_salt.length * 2 + passwordBytes.length];
-                                System.arraycopy(currentPassword.current_salt, 0, hash, 0, currentPassword.current_salt.length);
-                                System.arraycopy(passwordBytes, 0, hash, currentPassword.current_salt.length, passwordBytes.length);
-                                System.arraycopy(currentPassword.current_salt, 0, hash, hash.length - currentPassword.current_salt.length, currentPassword.current_salt.length);
-
-                                final TLRPC.TL_account_getTmpPassword req = new TLRPC.TL_account_getTmpPassword();
-                                req.password_hash = Utilities.computeSHA256(hash, 0, hash.length);
-                                req.period = 60 * 30;
-                                ConnectionsManager.getInstance().sendRequest(req, new RequestDelegate() {
-                                    @Override
-                                    public void run(final TLObject response, final TLRPC.TL_error error) {
-                                        AndroidUtilities.runOnUIThread(new Runnable() {
-                                            @Override
-                                            public void run() {
-                                                showEditDoneProgress(false);
-                                                setDonePressed(false);
-                                                if (response != null) {
-                                                    passwordOk = true;
-                                                    UserConfig.tmpPassword = (TLRPC.TL_account_tmpPassword) response;
-                                                    UserConfig.saveConfig(false);
-                                                    goToNextStep();
-                                                } else {
-                                                    if (error.text.equals("PASSWORD_HASH_INVALID")) {
-                                                        Vibrator v = (Vibrator) ApplicationLoader.applicationContext.getSystemService(Context.VIBRATOR_SERVICE);
-                                                        if (v != null) {
-                                                            v.vibrate(200);
-                                                        }
-                                                        AndroidUtilities.shakeView(inputFields[FIELD_SAVEDPASSWORD], 2, 0);
-                                                        inputFields[FIELD_SAVEDPASSWORD].setText("");
-                                                    } else {
-                                                        AlertsCreator.processError(error, PaymentFormActivity.this, req);
-                                                    }
-                                                }
-                                            }
-                                        });
-
+                                if (error1.text.equals("PASSWORD_HASH_INVALID")) {
+                                    Vibrator v = (Vibrator) ApplicationLoader.applicationContext.getSystemService(Context.VIBRATOR_SERVICE);
+                                    if (v != null) {
+                                        v.vibrate(200);
                                     }
-                                }, ConnectionsManager.RequestFlagFailOnServerErrors);
+                                    AndroidUtilities.shakeView(inputFields[FIELD_SAVEDPASSWORD], 2, 0);
+                                    inputFields[FIELD_SAVEDPASSWORD].setText("");
+                                } else {
+                                    AlertsCreator.processError(currentAccount, error1, PaymentFormActivity.this, req1);
+                                }
                             }
+                        });
+
+                        if (currentPassword.current_algo instanceof TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) {
+                            TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow algo = (TLRPC.TL_passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow) currentPassword.current_algo;
+                            req1.password = SRPHelper.startCheck(x_bytes, currentPassword.srp_id, currentPassword.srp_B, algo);
+                            if (req1.password == null) {
+                                TLRPC.TL_error error2 = new TLRPC.TL_error();
+                                error2.text = "ALGO_INVALID";
+                                requestDelegate.run(null, error2);
+                                return;
+                            }
+                            ConnectionsManager.getInstance(currentAccount).sendRequest(req1, requestDelegate, ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
                         } else {
-                            AlertsCreator.processError(error, PaymentFormActivity.this, req);
-                            showEditDoneProgress(false);
-                            setDonePressed(false);
+                            TLRPC.TL_error error2 = new TLRPC.TL_error();
+                            error2.text = "PASSWORD_HASH_INVALID";
+                            requestDelegate.run(null, error2);
                         }
-                    }
-                });
+                    });
+                }
+            } else {
+                AlertsCreator.processError(currentAccount, error, PaymentFormActivity.this, req);
+                showEditDoneProgress(true, false);
+                setDonePressed(false);
             }
-        }, ConnectionsManager.RequestFlagFailOnServerErrors);
+        }), ConnectionsManager.RequestFlagFailOnServerErrors);
     }
 
-    private void showEditDoneProgress(final boolean show) {
+    private void showEditDoneProgress(final boolean animateDoneItem, final boolean show) {
         if (doneItemAnimation != null) {
             doneItemAnimation.cancel();
         }
-        if (doneItem != null) {
+        if (animateDoneItem && doneItem != null) {
             doneItemAnimation = new AnimatorSet();
             if (show) {
                 progressView.setVisibility(View.VISIBLE);
@@ -2449,22 +3085,22 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         } else if (payTextView != null) {
             doneItemAnimation = new AnimatorSet();
             if (show) {
-                progressView.setVisibility(View.VISIBLE);
+                progressViewButton.setVisibility(View.VISIBLE);
                 bottomLayout.setEnabled(false);
                 doneItemAnimation.playTogether(
                         ObjectAnimator.ofFloat(payTextView, "scaleX", 0.1f),
                         ObjectAnimator.ofFloat(payTextView, "scaleY", 0.1f),
                         ObjectAnimator.ofFloat(payTextView, "alpha", 0.0f),
-                        ObjectAnimator.ofFloat(progressView, "scaleX", 1.0f),
-                        ObjectAnimator.ofFloat(progressView, "scaleY", 1.0f),
-                        ObjectAnimator.ofFloat(progressView, "alpha", 1.0f));
+                        ObjectAnimator.ofFloat(progressViewButton, "scaleX", 1.0f),
+                        ObjectAnimator.ofFloat(progressViewButton, "scaleY", 1.0f),
+                        ObjectAnimator.ofFloat(progressViewButton, "alpha", 1.0f));
             } else {
                 payTextView.setVisibility(View.VISIBLE);
                 bottomLayout.setEnabled(true);
                 doneItemAnimation.playTogether(
-                        ObjectAnimator.ofFloat(progressView, "scaleX", 0.1f),
-                        ObjectAnimator.ofFloat(progressView, "scaleY", 0.1f),
-                        ObjectAnimator.ofFloat(progressView, "alpha", 0.0f),
+                        ObjectAnimator.ofFloat(progressViewButton, "scaleX", 0.1f),
+                        ObjectAnimator.ofFloat(progressViewButton, "scaleY", 0.1f),
+                        ObjectAnimator.ofFloat(progressViewButton, "alpha", 0.0f),
                         ObjectAnimator.ofFloat(payTextView, "scaleX", 1.0f),
                         ObjectAnimator.ofFloat(payTextView, "scaleY", 1.0f),
                         ObjectAnimator.ofFloat(payTextView, "alpha", 1.0f));
@@ -2475,7 +3111,7 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
                 public void onAnimationEnd(Animator animation) {
                     if (doneItemAnimation != null && doneItemAnimation.equals(animation)) {
                         if (!show) {
-                            progressView.setVisibility(View.INVISIBLE);
+                            progressViewButton.setVisibility(View.INVISIBLE);
                         } else {
                             payTextView.setVisibility(View.INVISIBLE);
                         }
@@ -2513,6 +3149,8 @@ public class PaymentFormActivity extends BaseFragment implements NotificationCen
         arrayList.add(new ThemeDescription(linearLayout2, 0, new Class[]{View.class}, Theme.dividerPaint, null, null, Theme.key_divider));
         arrayList.add(new ThemeDescription(progressView, 0, null, null, null, null, Theme.key_contextProgressInner2));
         arrayList.add(new ThemeDescription(progressView, 0, null, null, null, null, Theme.key_contextProgressOuter2));
+        arrayList.add(new ThemeDescription(progressViewButton, 0, null, null, null, null, Theme.key_contextProgressInner2));
+        arrayList.add(new ThemeDescription(progressViewButton, 0, null, null, null, null, Theme.key_contextProgressOuter2));
 
         if (inputFields != null) {
             for (int a = 0; a < inputFields.length; a++) {
